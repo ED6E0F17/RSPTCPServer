@@ -451,19 +451,18 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 
 			rpt->len = 2 * numSamples;
 		}
-		else
-			if (sample_format == RSP_TCP_SAMPLE_FORMAT_INT16) {
-				rpt->data = (char*)malloc(4 * numSamples);
+		else if (sample_format == RSP_TCP_SAMPLE_FORMAT_INT16) {
+			rpt->data = (char*)malloc(4 * numSamples);
 
-				short *data;
-				data = (short*)rpt->data;
-				for (i = 0; i < numSamples; i++, xi++, xq++) {
-					*(data++) = *xi;
-					*(data++) = *xq;
-				}
-
-				rpt->len = 4 * numSamples;
+			short *data;
+			data = (short*)rpt->data;
+			for (i = 0; i < numSamples; i++, xi++, xq++) {
+				*(data++) = *xi;
+				*(data++) = *xq;
 			}
+
+			rpt->len = 4 * numSamples;
+		}
 
 		rpt->next = NULL;
 
@@ -491,7 +490,7 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 			}
 
 			cur->next = rpt;
-			if (verbose) {
+			if (verbose > 1) {
 				if (num_queued > global_numq)
 					printf("ll+, now %d\n", num_queued);
 				else if (num_queued < global_numq)
@@ -1431,6 +1430,7 @@ void usage(void)
 		"\t[-s samplerate in Hz (default: 2048000 Hz)]\n"
 		"\t[-n max number of linked list buffers to keep (default: 500)]\n"
 		"\t[-v Verbose output (debug) enable (default: disabled)]\n"
+		"\t[-V More verbose (debug) enable (default: disabled)]\n"
 		"\t[-E RSP extended mode enable (default: rtl_tcp compatible mode)\n"
 		"\t[-A AM notch enable (default: disabled)\n"
 		"\t[-B Broadcast notch enable (default: disabled)\n"
@@ -1478,7 +1478,7 @@ int main(int argc, char **argv)
 
 	printf("rsp_tcp version %d.%d\n\n", RSP_TCP_VERSION_MAJOR, RSP_TCP_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "a:p:f:b:s:n:d:P:TvADBFRE")) != -1) {
+	while ((opt = getopt(argc, argv, "a:p:f:b:s:n:d:P:TvVADBFRE")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
@@ -1514,6 +1514,10 @@ int main(int argc, char **argv)
 			break;
 		case 'v':
 			verbose = 1;
+			break;
+
+		case 'V':
+			verbose = 2;
 			break;
 
 		case 'E':
