@@ -361,8 +361,8 @@ static rsp_tcp_sample_format_t sample_format = RSP_TCP_SAMPLE_FORMAT_UINT8;
 static rsp_band_t current_band = BAND_UNKNOWN;
 static int current_antenna_input = 0;
 static unsigned int current_frequency;
-static int lna_state = DEFAULT_LNA_STATE;
-static int agc_state = DEFAULT_AGC_STATE;
+static unsigned int lna_state = DEFAULT_LNA_STATE;
+static unsigned int agc_state = DEFAULT_AGC_STATE;
 static int agc_set_point = DEFAULT_AGC_SETPOINT;
 static int gain_reduction = DEFAULT_GAIN_REDUCTION;
 static int am_port = -1;
@@ -583,7 +583,7 @@ static rsp_model_t hardware_ver_to_model(int hw_version)
 
 static rsp_band_t frequency_to_band(unsigned int f)
 {
-	if (f >= 0 && f < 60000000) {
+	if (/*f >= 0 &&*/ f < 60000000) {
 		return current_antenna_input == 2 ? BAND_AM_HIZ : BAND_AM;
 	}
 	else
