@@ -46,11 +46,8 @@
 #include <mirsdrapi-rsp.h>
 #endif
 
-struct llist {
-	char *data;
-	size_t len;
-	struct llist *next;
-};
+// temporary fixed resolution of 2.048 Mhz / 1 kHz = 2048 IQ samples
+#define FFT_SIZE (2048)
 
 typedef struct { /* structure size must be multiple of 2 bytes */
 	char magic[4];
@@ -87,9 +84,6 @@ double atofs(char *s)
 	return atof(s);
 }
 
-static int global_numq = 0;
-static struct llist *ll_buffers = 0;
-static int llbuf_num = 500;
 
 static volatile int do_exit = 0;
 
@@ -410,79 +404,48 @@ void gc_callback(unsigned int gRdB, unsigned int lnaGRdB, void* cbContext)
 	}
 }
 
+
+/*
+ *****************
+ * rx_callback() *
+ *****************
+ * Copies data from the SDRPlay RSP. (using 60% of a CPU on Pi2)
+ *
+ * Writes all samples into a circular buffer in four parts
+ * The main thread copies the most recently filled part for processing
+ *
+ */
+int16_t *circ_buffer = NULL;
+uint32_t buff_now = 0;
+uint32_t buff_offset = 0;
 void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChanged, int rfChanged, int fsChanged, unsigned int numSamples, unsigned int reset, unsigned int hwRemoved, void* cbContext)
 {
-	if (!do_exit) {
-		unsigned int i;
-		struct llist *rpt = (struct llist*)malloc(sizeof(struct llist));
+	if (circ_buffer && !do_exit) {
+		unsigned int i, j;
+		int16_t *data;
 
-		if (sample_format == RSP_TCP_SAMPLE_FORMAT_UINT8) {
-			rpt->data = (char*)malloc(2 * numSamples);
-
-			// assemble the data
-			char *data;
-			data = rpt->data;
-			for (i = 0; i < numSamples; i++, xi++, xq++) {
-				*(data++) = (unsigned char)(((*xi << sample_shift) >> 8) + 128);
-				*(data++) = (unsigned char)(((*xq << sample_shift) >> 8) + 128);
-			}
-
-			rpt->len = 2 * numSamples;
+		// (sample_format == RSP_TCP_SAMPLE_FORMAT_INT16)
+		j = buff_offset;
+		data = &circ_buffer[buff_now * FFT_SIZE * 2];
+		for (i = 0; (i < numSamples) && (j < FFT_SIZE * 2); i++) {
+			data[j++] = *xi;
+			data[j++] = *xq;
+			xi++; xq++;
 		}
-		else if (sample_format == RSP_TCP_SAMPLE_FORMAT_INT16) {
-			rpt->data = (char*)malloc(4 * numSamples);
+		buff_offset = j;
+		if (i == numSamples)
+			return;
 
-			short *data;
-			data = (short*)rpt->data;
-			for (i = 0; i < numSamples; i++, xi++, xq++) {
-				*(data++) = *xi;
-				*(data++) = *xq;
-			}
-
-			rpt->len = 4 * numSamples;
-		}
-
-		rpt->next = NULL;
-
-		if (ll_buffers == NULL) {
-			ll_buffers = rpt;
-		}
-		else {
-			struct llist *cur = ll_buffers;
-			int num_queued = 0;
-
-			while (cur->next != NULL) {
-				cur = cur->next;
-				num_queued++;
-			}
-
-			if (llbuf_num && llbuf_num == num_queued - 2) {
-				struct llist *curelem;
-
-				free(ll_buffers->data);
-				curelem = ll_buffers->next;
-				free(ll_buffers);
-				ll_buffers = curelem;
-			}
-
-			cur->next = rpt;
-			if (verbose > 1) {
-				if (num_queued > global_numq)
-					printf("ll+, now %d\n", num_queued);
-				else if (num_queued < global_numq)
-					printf("ll-, now %d\n", num_queued);
-			}
-			global_numq = num_queued;
+		// need to start a new buffer part
+		buff_offset = 0;
+		buff_now = (buff_now + 1) & 3; // four buffer parts
+		data = &circ_buffer[buff_now * FFT_SIZE * 2];
+		for (j = buff_offset; (i < numSamples) && (j < FFT_SIZE * 2); i++) {
+			data[j++] = *xi;
+			data[j++] = *xq;
+			xi++; xq++;
 		}
 	}
-}
-
-static void *tcp_worker(void *arg)
-{
-	while (1) {
-		;
-	}
-	return NULL;
 }
 
 static rsp_model_t hardware_ver_to_model(int hw_version)
@@ -1188,6 +1151,8 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	return 0;
 }
 
+// Keep it simple. rtl_power combines multiple overlapping bandwidths with variable resolution.
+// For now we will sample 2.048 Mhz at 1 kHz resolution, for  2048 samples per FFT
 void usage(void)
 {
 	printf("rsp_power, an RF power spectrum tool for SDRPlay receivers "
@@ -1231,7 +1196,7 @@ int main(int argc, char **argv)
 	int antenna = 0;
 	int enable_biastee = 0;
 	int enable_refout = 0;
-	int bit_depth = 8;
+	int bit_depth = 16;
 
 #ifdef _WIN32
 	WSADATA wsd;
@@ -1242,7 +1207,7 @@ int main(int argc, char **argv)
 
 	printf("rsp_tcp version %d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "f:b:s:n:d:P:TR")) != -1) {
+	while ((opt = getopt(argc, argv, "f:b:s:d:P:TR")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
@@ -1259,10 +1224,6 @@ int main(int argc, char **argv)
 		case 's':
 			samp_rate = (uint32_t)atofs(optarg);
 			break;
-		case 'n':
-			llbuf_num = atoi(optarg);
-			break;
-
 		case 'T':
 			enable_biastee = 1;
 			break;
@@ -1273,9 +1234,9 @@ int main(int argc, char **argv)
 			usage();
 			break;
 		}
-}
+	}
 
-	sample_format = /*RSP_TCP_SAMPLE_FORMAT_INT16 */ RSP_TCP_SAMPLE_FORMAT_UINT8;
+	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16; /* RSP_TCP_SAMPLE_FORMAT_UINT8 */
 
 	if (argc < optind) {
 		usage();
@@ -1331,9 +1292,6 @@ int main(int argc, char **argv)
 
 	if (hardware_model == RSP_MODEL_UNKNOWN || hardware_caps == NULL) {
 		printf("unknown RSP model (hw ver %d)\n", hardware_version);
-
-		// force compatibility mode when model is unknown
-		extended_mode = 0;
 	}
 	else {
 		printf("detected RSP model '%s' (hw ver %d)\n", model_to_string(hardware_model), hardware_version);
@@ -1357,14 +1315,13 @@ int main(int argc, char **argv)
 	SetConsoleCtrlHandler((PHANDLER_ROUTINE)sighandler, TRUE);
 #endif
 
+	// allocate buffers
 	{
-		printf("listening...\n");
+		printf("Starting to sample...\n");
 
-			tv.tv_sec = 1;
-			tv.tv_usec = 0;
-			if (do_exit) {
-				goto out;
-			}
+		if (do_exit) {
+			goto out;
+		}
 
 		memset(&dongle_info, 0, sizeof(dongle_info));
 		memcpy(&dongle_info.magic, "RTL0", 4);
@@ -1379,26 +1336,20 @@ int main(int argc, char **argv)
 			goto out;
 		}
 
-		// stop the receiver
-		mir_sdr_StreamUninit();
 
-		curelem = ll_buffers;
-		ll_buffers = 0;
-
-		while (curelem != 0) {
-			prev = curelem;
-			curelem = curelem->next;
-			free(prev->data);
-			free(prev);
+		while (!do_exit) {
+			usleep( 20000 );
+			// Stuff happens here
 		}
 
+
 		do_exit = 0;
-		global_numq = 0;
 	}
 
 out:
 	mir_sdr_StreamUninit();
 	mir_sdr_ReleaseDeviceIdx();
 
+	// if .. free ( buffers ) 
 	return 0;
 }
