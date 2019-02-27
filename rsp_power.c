@@ -1415,46 +1415,35 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 
 void usage(void)
 {
-	printf("rsp_tcp, an I/Q spectrum server for SDRPlay receivers "
-#ifdef SERVER_VERSION
-		"VERSION "SERVER_VERSION
-#endif
+	printf("rsp_power, an RF power spectrum tool for SDRPlay receivers "
 		"\n\n"
-		"Usage:\t[-a listen address]\n"
-		"\t[-p listen port (default: 1234)]\n"
+		"Usage:\n"
+		"\t[-f centre frequency to sample [Hz]]\n"
+		"\t[-b bandwidth to sample (default: 2048000 Hz)]\n"
+		"\t[-s samplerate in Hz (default: 2048000 Hz)]\n"
+		"\t[TODO:]\n"
+		"\t\t[set stepsize, defaults to 1 kHz]\n"
+		"\n"
+		"\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-P Antenna Port select* (0/1/2, default: 0, Port A)]\n"
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
-		"\t[-f frequency to tune to [Hz]]\n"
-		"\t[-s samplerate in Hz (default: 2048000 Hz)]\n"
-		"\t[-n max number of linked list buffers to keep (default: 500)]\n"
-		"\t[-v Verbose output (debug) enable (default: disabled)]\n"
-		"\t[-V More verbose (debug) enable (default: disabled)]\n"
-		"\t[-E RSP extended mode enable (default: rtl_tcp compatible mode)\n"
-		"\t[-A AM notch enable (default: disabled)\n"
-		"\t[-B Broadcast notch enable (default: disabled)\n"
-		"\t[-D DAB notch enable (default: disabled)\n"
-		"\t[-F RF notch enable (default: disabled)\n"
-		"\t[-b Sample bit-depth (8/16 default: 8)\n");
-	exit(1);
+	      );
+		exit(1);
 }
 
 int main(int argc, char **argv)
 {
 	int r, opt;
 	unsigned int i;
-	char* addr = "127.0.0.1";
-	int port = 1234;
 	uint32_t frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
-	struct sockaddr_in local, remote;
+	uint32_t bandwidth = DEFAULT_SAMPLERATE;
 	struct llist *curelem, *prev;
 	pthread_attr_t attr;
 	void *status;
 	struct timeval tv = { 1,0 };
 	struct linger ling = { 1,0 };
-	SOCKET listensocket;
-	socklen_t rlen;
 	fd_set readfds;
 	dongle_info_t dongle_info;
 
@@ -1478,13 +1467,13 @@ int main(int argc, char **argv)
 
 	printf("rsp_tcp version %d.%d\n\n", RSP_TCP_VERSION_MAJOR, RSP_TCP_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "a:p:f:b:s:n:d:P:TvVADBFRE")) != -1) {
+	while ((opt = getopt(argc, argv, "f:b:s:n:d:P:TR")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
 			break;
 		case 'b':
-			bit_depth = atoi(optarg);
+			bandwidth = (uint32_t)atofs(optarg);
 			break;
 		case 'P':
 			antenna = atoi(optarg);
@@ -1495,12 +1484,6 @@ int main(int argc, char **argv)
 		case 's':
 			samp_rate = (uint32_t)atofs(optarg);
 			break;
-		case 'a':
-			addr = optarg;
-			break;
-		case 'p':
-			port = atoi(optarg);
-			break;
 		case 'n':
 			llbuf_num = atoi(optarg);
 			break;
@@ -1508,32 +1491,8 @@ int main(int argc, char **argv)
 		case 'T':
 			enable_biastee = 1;
 			break;
-
 		case 'R':
 			enable_refout = 1;
-			break;
-		case 'v':
-			verbose = 1;
-			break;
-
-		case 'V':
-			verbose = 2;
-			break;
-
-		case 'E':
-			extended_mode = 1;
-			break;
-		case 'A':
-			notch |= RSP_TCP_NOTCH_AM;
-			break;
-		case 'D':
-			notch |= RSP_TCP_NOTCH_DAB;
-			break;
-		case 'B':
-			notch |= RSP_TCP_NOTCH_BROADCAST;
-			break;
-		case 'F':
-			notch |= RSP_TCP_NOTCH_RF;
 			break;
 		default:
 			usage();
@@ -1541,11 +1500,7 @@ int main(int argc, char **argv)
 		}
 }
 
-	if (bit_depth != 8 && bit_depth != 16) {
-		usage();
-	}
-
-	sample_format = bit_depth == 16 ? RSP_TCP_SAMPLE_FORMAT_INT16 : RSP_TCP_SAMPLE_FORMAT_UINT8;
+	sample_format = /*RSP_TCP_SAMPLE_FORMAT_INT16 */ RSP_TCP_SAMPLE_FORMAT_UINT8;
 
 	if (argc < optind) {
 		usage();
@@ -1630,56 +1585,14 @@ int main(int argc, char **argv)
 	pthread_mutex_init(&ll_mutex, NULL);
 	pthread_cond_init(&cond, NULL);
 
-	memset(&local, 0, sizeof(local));
-	local.sin_family = AF_INET;
-	local.sin_port = htons(port);
-	local.sin_addr.s_addr = inet_addr(addr);
-
-	listensocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	r = 1;
-	setsockopt(listensocket, SOL_SOCKET, SO_REUSEADDR, (char *)&r, sizeof(int));
-	setsockopt(listensocket, SOL_SOCKET, SO_LINGER, (char *)&ling, sizeof(ling));
-	bind(listensocket, (struct sockaddr *)&local, sizeof(local));
-
-#ifdef _WIN32
-	opt = 1;
-	ioctlsocket(listensocket, FIONBIO, &opt);
-#else
-	r = fcntl(listensocket, F_GETFL, 0);
-	r = fcntl(listensocket, F_SETFL, r | O_NONBLOCK);
-#endif
-
-	while (1) {
+	{
 		printf("listening...\n");
 
-		if (!extended_mode) {
-			printf("Use the device argument 'rtl_tcp=%s:%d' in OsmoSDR "
-				"(gr-osmosdr) source\n"
-				"to receive samples in GRC and control "
-				"rtl_tcp parameters (frequency, gain, ...).\n",
-				addr, port);
-		}
-		listen(listensocket, 1);
-
-		while (1) {
-			FD_ZERO(&readfds);
-			FD_SET(listensocket, &readfds);
 			tv.tv_sec = 1;
 			tv.tv_usec = 0;
-			r = select(listensocket + 1, &readfds, NULL, NULL, &tv);
 			if (do_exit) {
 				goto out;
 			}
-			else if (r) {
-				rlen = sizeof(remote);
-				s = accept(listensocket, (struct sockaddr *)&remote, &rlen);
-				break;
-			}
-		}
-
-		setsockopt(s, SOL_SOCKET, SO_LINGER, (char *)&ling, sizeof(ling));
-
-		printf("client accepted!\n");
 
 		memset(&dongle_info, 0, sizeof(dongle_info));
 		memcpy(&dongle_info.magic, "RTL0", 4);
@@ -1724,29 +1637,27 @@ int main(int argc, char **argv)
 		r = pthread_create(&tcp_worker_thread, &attr, tcp_worker, NULL);
 		if (r != 0) {
 			printf("failed to create tcp worker thread\n");
-			break;
+			goto out;
 		}
 
 		// initialise API and start the rx		
 		r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna);
 		if (r != 0) {
 			printf("failed to initialise RSP device\n");
-			break;
+			goto out;
 		}
 
 		// the rx must be started before accepting commands from the command worker
 		r = pthread_create(&command_thread, &attr, command_worker, NULL);
 		if (r != 0) {
 			printf("failed to create command thread\n");
-			break;
+			goto out;
 		}
 		pthread_attr_destroy(&attr);
 
 		// wait for the workers to exit
 		pthread_join(tcp_worker_thread, &status);
 		pthread_join(command_thread, &status);
-
-		closesocket(s);
 
 		// stop the receiver
 		mir_sdr_StreamUninit();
@@ -1770,11 +1681,5 @@ out:
 	mir_sdr_StreamUninit();
 	mir_sdr_ReleaseDeviceIdx();
 
-	closesocket(listensocket);
-	closesocket(s);
-#ifdef _WIN32
-	WSACleanup();
-#endif
-	printf("bye!\n");
-	return r >= 0 ? r : -r;
+	return 0;
 }
