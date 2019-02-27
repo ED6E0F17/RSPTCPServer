@@ -16,18 +16,22 @@ message(STATUS "LIBSDRPLAY_LIBRARIES - ${LIBSDRPLAY_LIBRARIES}")
 
 set(CMAKE_BUILD_TYPE Release)
 
-set(SOURCE_FILES rsp_tcp.c)
+set(TCP_FILES rsp_tcp.c)
+set(POWER_FILES rsp_power.c)
+
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
-set(CMAKE_C_FLAGS "-Wall")
+set(CMAKE_C_FLAGS "-Wall -Wextra -Wno-unused")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -ggdb")
 add_definitions(-D_GNU_SOURCE)
 add_definitions(-DSERVER_VERSION="${PROJECT_VERSION}")
 include_directories(${LIBSDRPLAY_INCLUDE_DIRS})
 
-add_executable(rsp_tcp ${SOURCE_FILES} )
+add_executable(rsp_tcp ${TCP_FILES} )
+add_executable(rsp_power ${POWER_FILES} )
 target_link_libraries(rsp_tcp ${LIBSDRPLAY_LIBRARIES} Threads::Threads)
-install(TARGETS rsp_tcp DESTINATION bin)
+target_link_libraries(rsp_power ${LIBSDRPLAY_LIBRARIES} m)
+install(TARGETS rsp_tcp rsp_power DESTINATION bin)
 
 set(CPACK_GENERATOR DEB)
 set(CPACK_PACKAGE_VENDOR "F4FHH Nicolas")
@@ -38,6 +42,6 @@ set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_NAME ${PROJECT_NAME})
 set(CPACK_STRIP_FILES true)
-set(CPACK_PACKAGE_EXECUTABLES rsp_tcp)
+set(CPACK_PACKAGE_EXECUTABLES rsp_tcp rsp_power)
 
 include(CPack)
