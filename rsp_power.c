@@ -40,33 +40,11 @@
 #include "getopt/getopt.h"
 #endif
 
-#include <pthread.h>
-
 #ifdef _WIN32
 #include <mir_sdr.h>
 #else
 #include <mirsdrapi-rsp.h>
 #endif
-
-#ifdef _WIN32
-#pragma comment(lib, "ws2_32.lib")
-
-typedef int socklen_t;
-
-#else
-#define closesocket close
-#define SOCKADDR struct sockaddr
-#define SOCKET int
-#define SOCKET_ERROR -1
-#endif
-
-static SOCKET s;
-
-static pthread_t tcp_worker_thread;
-static pthread_t command_thread;
-
-static pthread_mutex_t ll_mutex;
-static pthread_cond_t cond;
 
 struct llist {
 	char *data;
@@ -115,8 +93,8 @@ static int llbuf_num = 500;
 
 static volatile int do_exit = 0;
 
-#define RSP_TCP_VERSION_MAJOR (1)
-#define RSP_TCP_VERSION_MINOR (0)
+#define RSP_POWER_VERSION_MAJOR (1)
+#define RSP_POWER_VERSION_MINOR (0)
 
 #define MAX_DECIMATION_FACTOR (64)
 #define MAX_DEVS 4
@@ -466,8 +444,6 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 
 		rpt->next = NULL;
 
-		pthread_mutex_lock(&ll_mutex);
-
 		if (ll_buffers == NULL) {
 			ll_buffers = rpt;
 		}
@@ -498,69 +474,15 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 			}
 			global_numq = num_queued;
 		}
-		pthread_cond_signal(&cond);
-		pthread_mutex_unlock(&ll_mutex);
 	}
 }
 
 static void *tcp_worker(void *arg)
 {
-	struct llist *curelem, *prev;
-	int bytesleft, bytessent, index;
-	struct timeval tv = { 1,0 };
-	struct timespec ts;
-	struct timeval tp;
-	fd_set writefds;
-	int r = 0;
-
 	while (1) {
-		if (do_exit) {
-			pthread_exit(0);
-		}
-
-		pthread_mutex_lock(&ll_mutex);
-		gettimeofday(&tp, NULL);
-		ts.tv_sec = tp.tv_sec + WORKER_TIMEOUT_SEC;
-		ts.tv_nsec = tp.tv_usec * 1000;
-		r = pthread_cond_timedwait(&cond, &ll_mutex, &ts);
-		if (r == ETIMEDOUT) {
-			pthread_mutex_unlock(&ll_mutex);
-			printf("worker cond timeout\n");
-			sighandler(0);
-			pthread_exit(NULL);
-		}
-
-		curelem = ll_buffers;
-		ll_buffers = 0;
-		pthread_mutex_unlock(&ll_mutex);
-
-		while (curelem != 0) {
-			bytesleft = curelem->len;
-			index = 0;
-			bytessent = 0;
-			while (bytesleft > 0) {
-				FD_ZERO(&writefds);
-				FD_SET(s, &writefds);
-				tv.tv_sec = 1;
-				tv.tv_usec = 0;
-				r = select(s + 1, NULL, &writefds, NULL, &tv);
-				if (r) {
-					bytessent = send(s, &curelem->data[index], bytesleft, 0);
-					bytesleft -= bytessent;
-					index += bytessent;
-				}
-				if (bytessent == SOCKET_ERROR || do_exit) {
-					printf("worker socket bye\n");
-					sighandler(0);
-					pthread_exit(NULL);
-				}
-			}
-			prev = curelem;
-			curelem = curelem->next;
-			free(prev->data);
-			free(prev);
-		}
+		;
 	}
+	return NULL;
 }
 
 static rsp_model_t hardware_ver_to_model(int hw_version)
@@ -1218,159 +1140,12 @@ static int set_sample_rate(uint32_t sr)
 	return r;
 }
 
-#ifdef _WIN32
-#define __attribute__(x)
-#pragma pack(push, 1)
-#endif
-struct command {
-	unsigned char cmd;
-	unsigned int param;
-}__attribute__((packed));
-#ifdef _WIN32
-#pragma pack(pop)
-#endif
-
 static void *command_worker(void *arg)
 {
-	int left, received = 0;
-	fd_set readfds;
-	struct command cmd = { 0, 0 };
-	struct timeval tv = { 1, 0 };
-	int r = 0;
-	uint32_t tmp;
-
 	while (1) {
-		left = sizeof(cmd);
-		while (left > 0) {
-			FD_ZERO(&readfds);
-			FD_SET(s, &readfds);
-			tv.tv_sec = 1;
-			tv.tv_usec = 0;
-			r = select(s + 1, &readfds, NULL, NULL, &tv);
-			if (r) {
-				received = recv(s, (char*)&cmd + (sizeof(cmd) - left), left, 0);
-				left -= received;
-			}
-			if (received == SOCKET_ERROR || do_exit) {
-				printf("comm recv bye\n");
-				sighandler(0);
-				pthread_exit(NULL);
-			}
-		}
-		switch (cmd.cmd) {
-		case 0x01:
-			printf("set freq %d\n", ntohl(cmd.param));
-			set_freq(ntohl(cmd.param));
-			break;
-		case 0x02:
-			printf("set sample rate %d\n", ntohl(cmd.param));
-			set_sample_rate(ntohl(cmd.param));
-			break;
-		case 0x03:
-			printf("set gain mode %d\n", ntohl(cmd.param));
-			set_tuner_gain_mode(ntohl(cmd.param));
-			break;
-		case 0x04:
-			printf("set gain %d\n", ntohl(cmd.param));
-			set_gain(ntohl(cmd.param));
-			break;
-		case 0x05:
-			printf("set freq correction %d\n", ntohl(cmd.param));
-			set_freq_correction(ntohl(cmd.param));
-			break;
-		case 0x06:
-			tmp = ntohl(cmd.param);
-			printf("set if stage %d gain %d\n", tmp >> 16, (short)(tmp & 0xffff));
-			break;
-		case 0x07:
-			printf("set test mode %d\n", ntohl(cmd.param));
-			break;
-		case 0x08:
-			printf("set agc mode %d\n", ntohl(cmd.param));
-			break;
-		case 0x09:
-			printf("set direct sampling %d\n", ntohl(cmd.param));
-			break;
-		case 0x0a:
-			printf("set offset tuning %d\n", ntohl(cmd.param));
-			break;
-		case 0x0b:
-			printf("set rtl xtal %d\n", ntohl(cmd.param));
-			break;
-		case 0x0c:
-			printf("set tuner xtal %d\n", ntohl(cmd.param));
-			break;
-		case 0x0d:
-			printf("set tuner gain by index %d\n", ntohl(cmd.param));
-			set_gain_by_index(ntohl(cmd.param));
-			break;
-		case 0x0e:
-			printf("set bias tee %d\n", ntohl(cmd.param));
-			set_bias_t((int)ntohl(cmd.param));
-			break;
-
-			// Extended mode commands
-		case RSP_TCP_COMMAND_SET_ANTENNA:
-			if (extended_mode) {
-				printf("set antenna input %d\n", ntohl(cmd.param));
-				set_antenna_input((unsigned int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_NOTCH:
-			if (extended_mode) {
-				printf("set notch filter 0x%x\n", ntohl(cmd.param));
-				set_notch_filters((unsigned int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_LNASTATE:
-			if (extended_mode) {
-				printf("set LNAState %d\n", ntohl(cmd.param));
-				set_lna((unsigned int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_IF_GAIN_R:
-			if (extended_mode) {
-				printf("set if gain reduction %d\n", ntohl(cmd.param));
-				set_if_gain_reduction((int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_AGC:
-			if (extended_mode) {
-				printf("set agc %d\n", ntohl(cmd.param));
-				set_agc((unsigned int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_AGC_SETPOINT:
-			if (extended_mode) {
-				printf("set agc set point %d\n", ntohl(cmd.param));
-				set_agc_setpoint((int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_BIAST:
-			if (extended_mode) {
-				printf("set bias-t %d\n", ntohl(cmd.param));
-				set_bias_t((unsigned int)ntohl(cmd.param));
-			}
-			break;
-
-		case RSP_TCP_COMMAND_SET_REFOUT:
-			if (extended_mode) {
-				printf("set reference out %d\n", ntohl(cmd.param));
-				set_refclock_output((unsigned int)ntohl(cmd.param));
-			}
-			break;
-
-		default:
-			break;
-		}
-		cmd.cmd = 0xff;
+		;
 	}
+	return NULL;
 }
 
 int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna)
@@ -1465,7 +1240,7 @@ int main(int argc, char **argv)
 	struct sigaction sigact, sigign;
 #endif
 
-	printf("rsp_tcp version %d.%d\n\n", RSP_TCP_VERSION_MAJOR, RSP_TCP_VERSION_MINOR);
+	printf("rsp_tcp version %d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
 	while ((opt = getopt(argc, argv, "f:b:s:n:d:P:TR")) != -1) {
 		switch (opt) {
@@ -1582,9 +1357,6 @@ int main(int argc, char **argv)
 	SetConsoleCtrlHandler((PHANDLER_ROUTINE)sighandler, TRUE);
 #endif
 
-	pthread_mutex_init(&ll_mutex, NULL);
-	pthread_cond_init(&cond, NULL);
-
 	{
 		printf("listening...\n");
 
@@ -1600,46 +1372,6 @@ int main(int argc, char **argv)
 		dongle_info.tuner_type = htonl(RTLSDR_TUNER_R820T);
 		dongle_info.tuner_gain_count = htonl(GAIN_STEPS-1);
 
-		r = send(s, (const char *)&dongle_info, sizeof(dongle_info), 0);
-		if (sizeof(dongle_info) != r) {
-			printf("failed to send dongle information\n");
-		}
-
-		if (extended_mode)
-		{
-			rsp_extended_capabilities_t rsp_cap;
-
-			printf("sending RSP extended capabilities structure\n");
-
-			memset(&rsp_cap, 0, sizeof(rsp_extended_capabilities_t));
-			memcpy(&rsp_cap.magic, RSP_CAPABILITIES_MAGIC, 4);
-
-			rsp_cap.version = htonl(RSP_CAPABILITIES_VERSION);
-			rsp_cap.hardware_version = htonl(hardware_version);
-			rsp_cap.capabilities = htonl(hardware_caps->capabilities);
-			rsp_cap.sample_format = htonl(sample_format);
-
-			rsp_cap.antenna_input_count = hardware_caps->antenna_input_count;
-			rsp_cap.tuner_count = hardware_caps->tuner_count;
-			rsp_cap.ifgr_min = hardware_caps->min_ifgr;
-			rsp_cap.ifgr_max = hardware_caps->max_ifgr;
-
-			r = send(s, (const char *)&rsp_cap, sizeof(rsp_cap), 0);
-			if (sizeof(rsp_cap) != r) {
-				printf("failed to send RSP capabilities information\n");
-			}
-		}
-
-		// must start the tcp_worker before the first samples are available from the rx
-		// because the rx_callback tries to send a condition to the worker thread
-		pthread_attr_init(&attr);
-		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-		r = pthread_create(&tcp_worker_thread, &attr, tcp_worker, NULL);
-		if (r != 0) {
-			printf("failed to create tcp worker thread\n");
-			goto out;
-		}
-
 		// initialise API and start the rx		
 		r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna);
 		if (r != 0) {
@@ -1647,21 +1379,8 @@ int main(int argc, char **argv)
 			goto out;
 		}
 
-		// the rx must be started before accepting commands from the command worker
-		r = pthread_create(&command_thread, &attr, command_worker, NULL);
-		if (r != 0) {
-			printf("failed to create command thread\n");
-			goto out;
-		}
-		pthread_attr_destroy(&attr);
-
-		// wait for the workers to exit
-		pthread_join(tcp_worker_thread, &status);
-		pthread_join(command_thread, &status);
-
 		// stop the receiver
 		mir_sdr_StreamUninit();
-		printf("all threads dead..\n");
 
 		curelem = ll_buffers;
 		ll_buffers = 0;
