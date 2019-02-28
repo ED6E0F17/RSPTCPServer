@@ -26,34 +26,25 @@
 
 #include "rsp_tcp_api.h"
 
-#ifndef _WIN32
 #include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <fcntl.h>
-#else
-#include <winsock2.h>
-#include "getopt/getopt.h"
-#endif
+#include <time.h>
+#include <math.h>
 
-#ifdef _WIN32
-#include <mir_sdr.h>
-#else
 #include <mirsdrapi-rsp.h>
-#endif
 
 // temporary fixed resolution of 2.048 Mhz / 1 kHz = 2048 IQ samples
 #define FFT_SIZE (2048)
 
-typedef struct { /* structure size must be multiple of 2 bytes */
-	char magic[4];
-	uint32_t tuner_type;
-	uint32_t tuner_gain_count;
-} dongle_info_t;
+FILE *file;
+
+int16_t* Sinewave;
+double* power_table;
+int16_t *fft_buf;
+unsigned long *avg = NULL;
+int freq;
+int rate;
+int samples;
+int peak_hold = 0;
 
 double atofs(char *s)
 /* standard suffixes */
@@ -378,7 +369,7 @@ sighandler(int signum)
 #else
 static void sighandler(int signum)
 {
-	fprintf(stderr, "Signal (%d) caught, ask for exit!\n", signum);
+	fprintf(stderr, "Signal (%d) caught: Exit!\n", signum);
 	do_exit = 1;
 }
 #endif
@@ -1103,14 +1094,6 @@ static int set_sample_rate(uint32_t sr)
 	return r;
 }
 
-static void *command_worker(void *arg)
-{
-	while (1) {
-		;
-	}
-	return NULL;
-}
-
 int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna)
 {
 	int r;
@@ -1151,18 +1134,82 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	return 0;
 }
 
+void scanner(void)
+{
+	int i, j, j2, f, n_read, bin_len, buf_len;
+	int32_t w;
+	buf_len = FFT_SIZE;
+	bin_len = FFT_SIZE;
+	// single pass for now
+	{
+		get_data(); // update fft_buff
+
+		remove_dc(fft_buf, buf_len);
+		remove_dc(fft_buf + 1, buf_len);
+		fix_fft(fft_buf);
+
+		if (!peak_hold) {
+			for (j=0; j<bin_len; j++) {
+				avg[j] += real_conj(fft_buf[j*2], fft_buf[j*2+1]);
+			}
+		} else {
+			for (j=0; j<bin_len; j++) {
+				avg[j] = MAX((unsigned long)real_conj(fft_buf[j*2], fft_buf[j*2+1]), avg[j]);
+			}
+		}
+	}
+}
+
+void csv_dbm()
+{
+	int i, len, ds, i1, i2, bw2, bin_count;
+	long tmp;
+	double dbm;
+	len = FFT_SIZE;
+	/* fix FFT stuff quirks */
+	/* nuke DC component (not effective for all windows) */
+	avg[0] = avg[1];
+	/* FFT is translated by 180 degrees */
+	for (i=0; i<len/2; i++) {
+		tmp = avg[i];
+		avg[i] = avg[i+len/2];
+		avg[i+len/2] = tmp;
+	}
+
+	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
+	bin_count = len;
+	bw2 = (int)(((double)rate * (double)bin_count) / (len * 2));
+	fprintf(file, "%i, %i, %.2f, %i, ", freq - bw2, freq + bw2,
+		(double)rate / (double)len, samples);
+
+	i1 = 0; // + (int)((double)len * ts->crop * 0.5);
+	i2 = (len-1); // - (int)((double)len * ts->crop * 0.5);
+	for (i=i1; i<=i2; i++) {
+		dbm  = (double)avg[i];
+		dbm /= (double)rate;
+		dbm /= (double)samples;
+		dbm  = 10 * log10(dbm);
+		fprintf(file, "%.2f, ", dbm);
+	}
+	dbm = (double)avg[i2] / ((double)rate * (double)samples);
+	dbm  = 10 * log10(dbm);
+	fprintf(file, "%.2f\n", dbm);
+	for (i=0; i<len; i++)
+		avg[i] = 0L;
+	samples = 0;
+}
+
 // Keep it simple. rtl_power combines multiple overlapping bandwidths with variable resolution.
 // For now we will sample 2.048 Mhz at 1 kHz resolution, for  2048 samples per FFT
 void usage(void)
 {
-	printf("rsp_power, an RF power spectrum tool for SDRPlay receivers "
+	printf("rsp_power, a minimal rtl_power for SDRPlay receivers "
 		"\n\n"
 		"Usage:\n"
 		"\t[-f centre frequency to sample [Hz]]\n"
-		"\t[-b bandwidth to sample (default: 2048000 Hz)]\n"
 		"\t[-s samplerate in Hz (default: 2048000 Hz)]\n"
 		"\t[TODO:]\n"
-		"\t\t[set stepsize, defaults to 1 kHz]\n"
+		"\t\t[set stepsize, defaults to 1 kHz / 2 Mhz]\n"
 		"\n"
 		"\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
@@ -1175,17 +1222,10 @@ void usage(void)
 
 int main(int argc, char **argv)
 {
-	int r, opt;
-	unsigned int i;
+	char *filename = NULL;
+	int length, r, opt, wb_mode = 0;
 	uint32_t frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
-	uint32_t bandwidth = DEFAULT_SAMPLERATE;
-	struct llist *curelem, *prev;
-	pthread_attr_t attr;
-	void *status;
-	struct timeval tv = { 1,0 };
-	struct linger ling = { 1,0 };
-	fd_set readfds;
-	dongle_info_t dongle_info;
+	uint32_t i, bandwidth = DEFAULT_SAMPLERATE;
 
 	float ver;
 	mir_sdr_DeviceT devices[MAX_DEVS];
@@ -1198,22 +1238,26 @@ int main(int argc, char **argv)
 	int enable_refout = 0;
 	int bit_depth = 16;
 
-#ifdef _WIN32
-	WSADATA wsd;
-	i = WSAStartup(MAKEWORD(2, 2), &wsd);
-#else
+	time_t next_tick;
+	time_t time_now;
+	time_t exit_time = 0;
+	char t_str[50];
+	struct tm *cal_time;
+	int interval = 10;
+
 	struct sigaction sigact, sigign;
-#endif
 
-	printf("rsp_tcp version %d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
+	int single = 1;
 
-	while ((opt = getopt(argc, argv, "f:b:s:d:P:TR")) != -1) {
+	printf("rsp_tcp V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
+
+	while ((opt = getopt(argc, argv, "f:c:s:d:P:TR")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
 			break;
-		case 'b':
-			bandwidth = (uint32_t)atofs(optarg);
+		case 'c':
+			// crop not implemented;
 			break;
 		case 'P':
 			antenna = atoi(optarg);
@@ -1236,6 +1280,9 @@ int main(int argc, char **argv)
 		}
 	}
 
+	freq = frequency;
+	rate = samp_rate;
+	samples = 0;
 	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16; /* RSP_TCP_SAMPLE_FORMAT_UINT8 */
 
 	if (argc < optind) {
@@ -1302,7 +1349,6 @@ int main(int argc, char **argv)
 	// disable decimation and  set decimation factor to 1
 	mir_sdr_DecimateControl(0, 1, 0);
 
-#ifndef _WIN32
 	sigact.sa_handler = sighandler;
 	sigemptyset(&sigact.sa_mask);
 	sigact.sa_flags = 0;
@@ -1311,45 +1357,66 @@ int main(int argc, char **argv)
 	sigaction(SIGTERM, &sigact, NULL);
 	sigaction(SIGQUIT, &sigact, NULL);
 	sigaction(SIGPIPE, &sigign, NULL);
-#else
-	SetConsoleCtrlHandler((PHANDLER_ROUTINE)sighandler, TRUE);
-#endif
 
-	// allocate buffers
-	{
-		printf("Starting to sample...\n");
-
-		if (do_exit) {
+	if (strcmp(filename, "-") == 0) { /* Write log to stdout */
+		file = stdout;
+	} else {
+		file = fopen(filename, "wb");
+		if (!file) {
+			fprintf(stderr, "Failed to open %s\n", filename);
 			goto out;
 		}
+	}
 
-		memset(&dongle_info, 0, sizeof(dongle_info));
-		memcpy(&dongle_info.magic, "RTL0", 4);
+	// allocate 5 buffers for 16 bit IQ samples
+	circ_buffer = calloc(5, FFT_SIZE * 2 * sizeof(int16_t));
 
-		dongle_info.tuner_type = htonl(RTLSDR_TUNER_R820T);
-		dongle_info.tuner_gain_count = htonl(GAIN_STEPS-1);
+	// initialise API and start the rx
+	r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna);
+	if (r != 0) {
+		printf("failed to initialise RSP device\n");
+		goto out;
+	}
 
-		// initialise API and start the rx		
-		r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna);
-		if (r != 0) {
-			printf("failed to initialise RSP device\n");
-			goto out;
-		}
+	next_tick = time(NULL) + interval;
+	if (exit_time) {
+		exit_time = time(NULL) + exit_time;}
 
+	avg = (unsigned long*)malloc(FFT_SIZE * sizeof(long));
+	if (!avg)
+		goto out;
 
-		while (!do_exit) {
-			usleep( 20000 );
-			// Stuff happens here
-		}
+	while (!do_exit) {
+		scanner();
+		//time_now = time(NULL);
+		//if (time_now < next_tick)
+		//	continue;
+		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
+		cal_time = localtime(&time_now);
+		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
 
+		fprintf(file, "%s, ", t_str);
+		csv_dbm();
 
-		do_exit = 0;
+		fflush(file);
+		if (single)
+			do_exit = 1;
+		if (exit_time && time(NULL) >= exit_time)
+			do_exit = 1;
+		//while (time(NULL) >= next_tick)
+		//	next_tick += interval;
 	}
 
 out:
+	do_exit = 1;
+
 	mir_sdr_StreamUninit();
 	mir_sdr_ReleaseDeviceIdx();
 
-	// if .. free ( buffers ) 
+	if(avg)
+		free(avg);
+	if (circ_buffer)
+		free( circ_buffer );
+
 	return 0;
 }
