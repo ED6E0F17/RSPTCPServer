@@ -36,6 +36,8 @@
 // temporary fixed resolution of 2.048 Mhz / 1 kHz = 2048 IQ samples
 #define FFT_INDEX (11)
 #define FFT_SIZE (2048)
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+
 
 FILE *file;
 
@@ -43,7 +45,7 @@ int16_t* Sinewave = NULL;
 double* power_table = NULL;
 int16_t *fft_buf;
 int N_WAVE, LOG2_N_WAVE;
-unsigned long *avg = NULL;
+float *avg = NULL;
 int freq;
 int rate;
 int samples;
@@ -444,7 +446,7 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 void get_data()
 {
 	uint32_t line = (buff_now + 3) & 3; // most recently filled
-	fft_buf = &circ_buffer[5 * FFT_SIZE * 2];
+	fft_buf = &circ_buffer[4 * FFT_SIZE * 2];
 	int16_t *in = &circ_buffer[line * FFT_SIZE * 2];
 	memcpy(fft_buf, in, FFT_SIZE * 2 * sizeof(int16_t));
 	// could copy extra data to wrap around for window function
@@ -1145,6 +1147,32 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	return 0;
 }
 
+
+float real_conj(int16_t real, int16_t imag)
+/* real(n * conj(n)) */
+{
+	return ((float)real*(float)real + (float)imag*(float)imag);
+}
+
+
+
+void remove_dc(int16_t *data, int length)
+/* works on interleaved data */
+{
+	int i;
+	int16_t ave;
+	long sum = 0L;
+	for (i=0; i < length; i+=2) {
+		sum += data[i];
+	}
+	ave = (int16_t)(sum / (long)(length));
+	if (ave == 0) {
+		return;}
+	for (i=0; i < length; i+=2) {
+		data[i] -= ave;
+	}
+}
+
 /* FFT based on fix_fft.c by Roberts, Slaney and Bouras
    http://www.jjj.de/fft/fftpage.html
    16 bit ints for everything
@@ -1251,6 +1279,7 @@ void scanner(void)
 	{
 		get_data(); // update fft_buff
 		// TODO: window function may improve quality
+		samples++;
 
 		remove_dc(fft_buf, buf_len);
 		remove_dc(fft_buf + 1, buf_len);
@@ -1271,7 +1300,7 @@ void scanner(void)
 void csv_dbm()
 {
 	int i, len, ds, i1, i2, bw2, bin_count;
-	long tmp;
+	float tmp;
 	double dbm;
 	len = FFT_SIZE;
 	/* fix FFT stuff quirks */
@@ -1303,7 +1332,7 @@ void csv_dbm()
 	dbm  = 10 * log10(dbm);
 	fprintf(file, "%.2f\n", dbm);
 	for (i=0; i<len; i++)
-		avg[i] = 0L;
+		avg[i] = 0.0f;
 	samples = 0;
 }
 
@@ -1330,7 +1359,7 @@ void usage(void)
 
 int main(int argc, char **argv)
 {
-	char *filename = NULL;
+	char *filename = "power.dump";
 	int length, r, opt, wb_mode = 0;
 	uint32_t frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
 	uint32_t i, bandwidth = DEFAULT_SAMPLERATE;
@@ -1357,7 +1386,7 @@ int main(int argc, char **argv)
 
 	int single = 1;
 
-	printf("rsp_tcp V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
+	printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
 	while ((opt = getopt(argc, argv, "f:c:s:d:P:TR")) != -1) {
 		switch (opt) {
@@ -1487,19 +1516,23 @@ int main(int argc, char **argv)
 	}
 
 	usleep(5000); // allow time for initial buffers to fill, and sdr to "settle"
-
 	next_tick = time(NULL) + interval;
 	if (exit_time) {
 		exit_time = time(NULL) + exit_time;}
 
 	if (!sine_table())
 		goto out;
-	avg = (unsigned long*)malloc(FFT_SIZE * sizeof(long));
+
+	avg = (float*)malloc(FFT_SIZE * sizeof(float));
 	if (!avg)
 		goto out;
+	for (i=0; i<FFT_SIZE; i++)
+		avg[i] = 0.0f;
 
 	while (!do_exit) {
 		scanner();
+		// running close to real time on a Pi2, so slow things down a bit
+		usleep(1000);
 		time_now = time(NULL);
 		if (time_now < next_tick)
 			continue;
@@ -1533,7 +1566,7 @@ out:
 	if (circ_buffer)
 		free(circ_buffer);
 	if (Sinewave)
-	       free (Sinewave);
+	       free(Sinewave);
 	if (power_table)
 	       free(power_table);
 
