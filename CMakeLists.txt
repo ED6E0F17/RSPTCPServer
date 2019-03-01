@@ -30,7 +30,7 @@ include_directories(${LIBSDRPLAY_INCLUDE_DIRS})
 add_executable(rsp_tcp ${TCP_FILES} )
 add_executable(rsp_power ${POWER_FILES} )
 target_link_libraries(rsp_tcp ${LIBSDRPLAY_LIBRARIES} Threads::Threads)
-target_link_libraries(rsp_power ${LIBSDRPLAY_LIBRARIES} Threads::Threads)
+target_link_libraries(rsp_power ${LIBSDRPLAY_LIBRARIES} m)
 install(TARGETS rsp_tcp rsp_power DESTINATION bin)
 
 set(CPACK_GENERATOR DEB)
