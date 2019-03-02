@@ -80,6 +80,32 @@ double atofs(char *s)
 	return atof(s);
 }
 
+double atoft(char *s)
+/* time suffixes, returns seconds */
+{
+	char last;
+	int len;
+	double suff = 1.0;
+	len = strlen(s);
+	last = s[len-1];
+	s[len-1] = '\0';
+	switch (last) {
+		case 'h':
+		case 'H':
+			suff *= 60;
+		case 'm':
+		case 'M':
+			suff *= 60;
+		case 's':
+		case 'S':
+			suff *= atof(s);
+			s[len-1] = last;
+			return suff;
+	}
+	s[len-1] = last;
+	return atof(s);
+}
+
 uint32_t get_frequency(char *optarg)
 {
 	double lower, upper, freq; // max_size is ignored
@@ -120,6 +146,7 @@ static volatile int do_exit = 0;
 #define DEFAULT_LNA_STATE 9
 #define DEFAULT_AGC_STATE 0
 #define RTLSDR_TUNER_R820T 5
+#define DEFAULT_GAIN 16;
 
 static int bwType = DEFAULT_BW_T;
 static int infoOverallGr;
@@ -935,8 +962,6 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 		return -1;
 	}
 
-	printf("started rx\n");
-	
 	// set bias-T
 	set_bias_t(enable_bias_t);
 
@@ -1142,9 +1167,12 @@ void usage(void)
 {
 	printf("rsp_power, a minimal rtl_power implementation for SDRPlay receivers."
 		"\n\n"
-		"Usage: rsp_power -f 433M:435M:1000 filename\n"
+		"Usage: rsp_power -f 433M:435M:1000 [options] filename\n"
 		"\t[-f low:high:step frequency to sample [Hz]]\n"
 		"\t[-g gain (0.0 to 50.0, default: 32)]\n"
+		"\t[-i integration_interval (default: 10 seconds)]\n"
+		"\t[-1 enables single-shot mode (default: off)]\n"
+		"\t[-e exit_timer (default: off/0)]\n"
 		"\n"
 		"\t[-S samplerate (use wih caution)]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
@@ -1183,7 +1211,7 @@ int main(int argc, char **argv)
 	int enable_biastee = 0;
 	int enable_refout = 0;
 	int bit_depth = 16;
-	int gain = 16;
+	int gain = DEFAULT_GAIN;
 
 	time_t next_tick;
 	time_t time_now;
@@ -1196,7 +1224,7 @@ int main(int argc, char **argv)
 
 	int single = 0;
 
-	printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
+	// printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
 	while ((opt = getopt(argc, argv, "f:i:e:c:g:A:S:s:w:d:P:p:F:Tt:R1DO")) != -1) {
 		switch (opt) {
@@ -1209,10 +1237,10 @@ int main(int argc, char **argv)
 		case 'g':
 			//gain range is 0 - 28 instead of 0.0 to 50.0
 			gain = (int)(atof(optarg) / 2.0);
-			if (gain <0)
-				gain = 0;
-			else if (gain > 26)
-				gain = 26;
+			if (gain < 0) {// autogain request
+				gain = DEFAULT_GAIN;
+			}else if (gain > 26) // out of range
+				gain = DEFAULT_GAIN;
 			break;
 		case 'A':
 			antenna = atoi(optarg);
@@ -1221,11 +1249,10 @@ int main(int argc, char **argv)
 			frequency = get_frequency(optarg);
 			break;
 		case 'i':
-			// needs a helper function
-			interval = atoi(optarg);
+			interval = (int)round(atoft(optarg));
 			break;
 		case 'e':
-			// exit_time = (time_t)((int)round(atoft(optarg)));
+			exit_time = (time_t)((int)round(atoft(optarg)));
 			break;
 		case 's':
 			// smoothing not implemented;
@@ -1286,7 +1313,7 @@ int main(int argc, char **argv)
 		printf("library libmirsdrapi-rsp must be version %.2f\n", ver);
 		exit(1);
 	}
-	printf("libmirsdrapi-rsp version %.2f found\n", ver);
+	// printf("libmirsdrapi-rsp version %.2f found\n", ver);
 
 	// enable debug output
 	if (verbose) {
@@ -1331,7 +1358,7 @@ int main(int argc, char **argv)
 		printf("unknown RSP model (hw ver %d)\n", hardware_version);
 	}
 	else {
-		printf("detected RSP model '%s' (hw ver %d)\n", model_to_string(hardware_model), hardware_version);
+		// printf("detected RSP model '%s' (hw ver %d)\n", model_to_string(hardware_model), hardware_version);
 	}
 
 	// enable DC offset and IQ imbalance correction
