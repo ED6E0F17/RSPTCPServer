@@ -80,6 +80,29 @@ double atofs(char *s)
 	return atof(s);
 }
 
+uint32_t get_frequency(char *optarg)
+{
+	double lower, upper, freq; // max_size is ignored
+	char *start, *stop, *step;
+
+	/* hacky string parsing */
+	start = strdup(optarg);
+	stop = strchr(start, ':') + 1;
+	stop[-1] = '\0';
+	step = strchr(stop, ':') + 1;
+	step[-1] = '\0';
+	lower = atofs(start);
+	upper = atofs(stop);
+	// max_size = atofs(step);
+	free(start);
+
+	freq = (lower + upper) / 2.0;
+	if (freq < 1.048e6) // reasonable minimum
+		freq = 1.048e6;
+	if (freq > 2.0e9) // unreasonable maximum
+		freq = 2.0e9;
+	return (uint32_t)freq;
+}
 
 static volatile int do_exit = 0;
 
@@ -1119,20 +1142,25 @@ void usage(void)
 {
 	printf("rsp_power, a minimal rtl_power implementation for SDRPlay receivers."
 		"\n\n"
-		"Usage:\n"
-		"\t[-f centre frequency to sample [Hz]]\n"
+		"Usage: rsp_power -f 433M:435M:1000 filename\n"
+		"\t[-f low:high:step frequency to sample [Hz]]\n"
 		"\t[-g gain (0.0 to 50.0, default: 32)]\n"
 		"\n"
-		"\t[-s samplerate in Hz ( 2048000 Hz )]\n"
+		"\t[-S samplerate (use wih caution)]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
-		"\t[-P Antenna Port select* (0/1/2, default: 0, Port A)]\n"
+		"\t[-A Antenna Port select* (0/1/2, default: 0, Port A)]\n"
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
+		"\tfilename (a '-' dumps samples to stdout)\n"
+		"\t (omitting the filename also uses stdout)\n"
+		"\n"
 		"\n"
 		"\t[TODO:]\n"
-		"\t[\t crop not implemented (Bandwidth = Samplerate)]\n"
+		"\t[\t cropping not implemented (Bandwidth = Samplerate)]\n"
 		"\t[\t combine multiple Bandwidths into one scan]\n"
 		"\t[\t stepsize ignored, defaults to Bandwidth/2048]\n"
+		"\t[\t window function not implemented (rectangular)]\n"
+		"\t[\t smoothing not implemented]\n"
 		"\n"
 	      );
 		exit(1);
@@ -1166,17 +1194,17 @@ int main(int argc, char **argv)
 
 	struct sigaction sigact, sigign;
 
-	int single = 1;
+	int single = 0;
 
 	printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "f:c:g:s:d:P:TR")) != -1) {
+	while ((opt = getopt(argc, argv, "f:i:e:c:g:A:S:s:w:d:P:p:F:Tt:R1DO")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
 			break;
 		case 'c':
-			// crop not implemented;
+			// cropping not implemented;
 			break;
 		case 'g':
 			//gain range is 0 - 28 instead of 0.0 to 50.0
@@ -1186,14 +1214,27 @@ int main(int argc, char **argv)
 			else if (gain > 26)
 				gain = 26;
 			break;
-		case 'P':
+		case 'A':
 			antenna = atoi(optarg);
 			break;
 		case 'f':
-			frequency = (uint32_t)atofs(optarg);
+			frequency = get_frequency(optarg);
+			break;
+		case 'i':
+			// needs a helper function
+			interval = atoi(optarg);
+			break;
+		case 'e':
+			// exit_time = (time_t)((int)round(atoft(optarg)));
 			break;
 		case 's':
-			samp_rate = (uint32_t)atofs(optarg);
+			// smoothing not implemented;
+			break;
+		case 'S':
+			samp_rate = (uint32_t)atoi(optarg);
+			break;
+		case 'w':
+			// windowing not implemented;
 			break;
 		case 'T':
 			enable_biastee = 1;
@@ -1201,6 +1242,26 @@ int main(int argc, char **argv)
 		case 'R':
 			enable_refout = 1;
 			break;
+		case 't':
+			// fft_threads = atoi(optarg);
+			break;
+		case 'p':
+			// ppm_error = atoi(optarg);
+			break;
+		case '1':
+			single = 1;
+			break;
+		case 'P':
+			peak_hold = 1;
+			break;
+		case 'D':
+			// direct_sampling = 1;
+		case 'O':
+			// offset_tuning = 1;
+		case 'F':
+			// comp_fir_size = atoi(optarg);
+			break;
+		case 'h':
 		default:
 			usage();
 			break;
@@ -1210,10 +1271,12 @@ int main(int argc, char **argv)
 	freq = frequency;
 	rate = samp_rate;
 	samples = 0;
-	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16; /* RSP_TCP_SAMPLE_FORMAT_UINT8 */
+	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
 
-	if (argc < optind) {
-		usage();
+	if (argc <= optind) {
+		filename = "-";
+	} else {
+		filename = argv[optind];
 	}
 
 	// check API version
