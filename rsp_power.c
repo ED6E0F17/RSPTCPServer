@@ -42,7 +42,6 @@
 FILE *file;
 
 int16_t* Sinewave = NULL;
-double* power_table = NULL;
 int16_t *fft_buf;
 int N_WAVE, LOG2_N_WAVE;
 float *avg = NULL;
@@ -1107,7 +1106,7 @@ static int set_sample_rate(uint32_t sr)
 	return r;
 }
 
-int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna)
+int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna, int gain)
 {
 	int r;
 	uint8_t ifgain, lnastate;
@@ -1116,8 +1115,8 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	current_band = frequency_to_band(freq);
 	current_frequency = freq;
 
-	// initialise at minimum gain	
-	if (!gain_index_to_gain(0, &ifgain, &lnastate)) {
+	// initialise gain
+	if (!gain_index_to_gain(gain, &ifgain, &lnastate)) {
 		gain_reduction = ifgain;
 		lna_state = lnastate;
 	}
@@ -1185,14 +1184,11 @@ int sine_table()
 	double d;
 	LOG2_N_WAVE = FFT_INDEX;
 	N_WAVE = 1 << LOG2_N_WAVE;
-	Sinewave = malloc(sizeof(int16_t) * N_WAVE*3/4);
-	power_table = malloc(sizeof(double) * N_WAVE);
+	Sinewave = malloc(sizeof(int16_t) * N_WAVE);
 	if (!Sinewave)
 		return 0;
-	if (!power_table)
-		return 0;
 
-	for (i=0; i<N_WAVE*3/4; i++)
+	for (i=0; i<N_WAVE; i++)
 	{
 		d = (double)i * 2.0 * M_PI / N_WAVE;
 		Sinewave[i] = (int)round(32767*sin(d));
@@ -1273,7 +1269,7 @@ void scanner(void)
 {
 	int i, j, j2, f, n_read, bin_len, buf_len;
 	int32_t w;
-	buf_len = FFT_SIZE;
+	buf_len = FFT_SIZE * 2;
 	bin_len = FFT_SIZE;
 	// single pass for now
 	{
@@ -1281,8 +1277,6 @@ void scanner(void)
 		// TODO: window function may improve quality
 		samples++;
 
-		remove_dc(fft_buf, buf_len);
-		remove_dc(fft_buf + 1, buf_len);
 		fix_fft(fft_buf);
 
 		if (!peak_hold) {
@@ -1291,7 +1285,7 @@ void scanner(void)
 			}
 		} else {
 			for (j=0; j<bin_len; j++) {
-				avg[j] = MAX((unsigned long)real_conj(fft_buf[j*2], fft_buf[j*2+1]), avg[j]);
+				avg[j] = MAX(real_conj(fft_buf[j*2], fft_buf[j*2+1]), avg[j]);
 			}
 		}
 	}
@@ -1340,19 +1334,23 @@ void csv_dbm()
 // For now we will sample 2.048 Mhz at 1 kHz resolution, for  2048 samples per FFT
 void usage(void)
 {
-	printf("rsp_power, a minimal rtl_power for SDRPlay receivers "
+	printf("rsp_power, a minimal rtl_power implementation for SDRPlay receivers."
 		"\n\n"
 		"Usage:\n"
 		"\t[-f centre frequency to sample [Hz]]\n"
-		"\t[-s samplerate in Hz (default: 2048000 Hz)]\n"
-		"\t[TODO:]\n"
-		"\t\t[set stepsize, defaults to 1 kHz / 2 Mhz]\n"
+		"\t[-g gain (0.0 to 50.0, default: 32)]\n"
 		"\n"
-		"\n"
+		"\t[-s samplerate in Hz ( 2048000 Hz )]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-P Antenna Port select* (0/1/2, default: 0, Port A)]\n"
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
+		"\n"
+		"\t[TODO:]\n"
+		"\t[\t crop not implemented (Bandwidth = Samplerate)]\n"
+		"\t[\t combine multiple Bandwidths into one scan]\n"
+		"\t[\t stepsize ignored, defaults to Bandwidth/2048]\n"
+		"\n"
 	      );
 		exit(1);
 }
@@ -1374,13 +1372,14 @@ int main(int argc, char **argv)
 	int enable_biastee = 0;
 	int enable_refout = 0;
 	int bit_depth = 16;
+	int gain = 16;
 
 	time_t next_tick;
 	time_t time_now;
 	time_t exit_time = 0;
 	char t_str[50];
 	struct tm *cal_time;
-	int interval = 10;
+	int interval = 5;
 
 	struct sigaction sigact, sigign;
 
@@ -1388,13 +1387,21 @@ int main(int argc, char **argv)
 
 	printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "f:c:s:d:P:TR")) != -1) {
+	while ((opt = getopt(argc, argv, "f:c:g:s:d:P:TR")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
 			break;
 		case 'c':
 			// crop not implemented;
+			break;
+		case 'g':
+			//gain range is 0 - 28 instead of 0.0 to 50.0
+			gain = (int)(atof(optarg) / 2.0);
+			if (gain <0)
+				gain = 0;
+			else if (gain > 26)
+				gain = 26;
 			break;
 		case 'P':
 			antenna = atoi(optarg);
@@ -1482,7 +1489,7 @@ int main(int argc, char **argv)
 	}
 
 	// enable DC offset and IQ imbalance correction
-	mir_sdr_DCoffsetIQimbalanceControl(1, 1);
+	mir_sdr_DCoffsetIQimbalanceControl(0, 0);
 	// disable decimation and  set decimation factor to 1
 	mir_sdr_DecimateControl(0, 1, 0);
 
@@ -1509,7 +1516,7 @@ int main(int argc, char **argv)
 	circ_buffer = calloc(5, FFT_SIZE * 2 * sizeof(int16_t));
 
 	// initialise API and start the rx
-	r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna);
+	r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
 	if (r != 0) {
 		printf("failed to initialise RSP device\n");
 		goto out;
@@ -1567,8 +1574,6 @@ out:
 		free(circ_buffer);
 	if (Sinewave)
 	       free(Sinewave);
-	if (power_table)
-	       free(power_table);
 
 	return 0;
 }
