@@ -37,20 +37,35 @@
 // temporary fixed resolution of 2.048 Mhz / 1 kHz = 2048 IQ samples
 #define FFT_INDEX (11)
 #define FFT_SIZE (2048)
+
+// buffer sizes: 2048 IQ -> 196 IQ -> (196 mono or 48 IQ) -> 48 mono  -> 480 OUT
+#define LEN_FM_W (3 * FFT_SIZE / 32 )
+#define LEN_FM_N (LEN_FM_W / 4)
+#define LEN_OUT (10 * LEN_FM_N)
+
+// IQ input, 196 sample pairs, output as 48 samples audio
+int16_t fm_buff[LEN_FM_W * 2];
+
+// audio output, 48 samples per ms
+int16_t	result48[LEN_OUT];
+
+
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
-
+int16_t* IQ = NULL;
+float *avg = NULL;
+int offset_freq;
+int samples;
 FILE *file;
 
-int16_t* Sinewave = NULL;
-int16_t *fft_buf;
-int N_WAVE, LOG2_N_WAVE;
-float *avg = NULL;
-int freq;
-int rate;
-int samples;
-int peak_hold = 0;
-double crop = 0.2;
+typedef enum {
+MODE_FM,
+MODE_USB,
+MODE_RAW,
+MODE_LSB,
+MODE_AM
+} demod_t;
+demod_t mode_demod = MODE_FM;
 
 double atofs(char *s)
 /* standard suffixes */
@@ -81,52 +96,6 @@ double atofs(char *s)
 	return atof(s);
 }
 
-double atofp(char *s)
-/* percent suffixes */
-{
-	char last;
-	int len;
-	double suff = 1.0;
-	len = strlen(s);
-	last = s[len-1];
-	s[len-1] = '\0';
-	switch (last) {
-		case '%':
-			suff *= 0.01;
-			suff *= atof(s);
-			s[len-1] = last;
-			return suff;
-	}
-	s[len-1] = last;
-	return atof(s);
-}
-
-double atoft(char *s)
-/* time suffixes, returns seconds */
-{
-	char last;
-	int len;
-	double suff = 1.0;
-	len = strlen(s);
-	last = s[len-1];
-	s[len-1] = '\0';
-	switch (last) {
-		case 'h':
-		case 'H':
-			suff *= 60;
-		case 'm':
-		case 'M':
-			suff *= 60;
-		case 's':
-		case 'S':
-			suff *= atof(s);
-			s[len-1] = last;
-			return suff;
-	}
-	s[len-1] = last;
-	return atof(s);
-}
-
 uint32_t get_frequency(char *optarg)
 {
 	double lower, upper, freq; // max_size is ignored
@@ -153,8 +122,8 @@ uint32_t get_frequency(char *optarg)
 
 static volatile int do_exit = 0;
 
-#define RSP_POWER_VERSION_MAJOR (1)
-#define RSP_POWER_VERSION_MINOR (0)
+#define RSP_FM_VERSION_MAJOR (1)
+#define RSP_FM_VERSION_MINOR (0)
 
 #define MAX_DECIMATION_FACTOR (64)
 #define MAX_DEVS 4
@@ -193,63 +162,29 @@ static int sample_shift = 2;
 
 // *************************************
 
-#ifdef _WIN32
-int gettimeofday(struct timeval *tv, void* ignored)
-{
-	FILETIME ft;
-	unsigned __int64 tmp = 0;
-	if (NULL != tv) {
-		GetSystemTimeAsFileTime(&ft);
-		tmp |= ft.dwHighDateTime;
-		tmp <<= 32;
-		tmp |= ft.dwLowDateTime;
-		tmp /= 10;
-#ifdef _MSC_VER
-		tmp -= 11644473600000000Ui64;
-#else
-		tmp -= 11644473600000000ULL;
-#endif
-		tv->tv_sec = (long)(tmp / 1000000UL);
-		tv->tv_usec = (long)(tmp % 1000000UL);
-	}
-	return 0;
-}
-
-BOOL WINAPI
-sighandler(int signum)
-{
-	if (CTRL_C_EVENT == signum) {
-		fprintf(stderr, "Signal caught, exiting!\n");
-		do_exit = 1;
-		return TRUE;
-	}
-	return FALSE;
-}
-#else
 static void sighandler(int signum)
 {
 	fprintf(stderr, "Signal (%d) caught: Exit!\n", signum);
 	do_exit = 1;
 }
-#endif
 
 void gc_callback(unsigned int gRdB, unsigned int lnaGRdB, void* cbContext)
 {
 	if (gRdB == mir_sdr_ADC_OVERLOAD_DETECTED)
 	{
-		printf("adc overload\n");
+		fprintf(stderr, "adc overload\n");
 		mir_sdr_GainChangeCallbackMessageReceived();
 	}
 	else if (gRdB == mir_sdr_ADC_OVERLOAD_CORRECTED)
 	{
-		printf("adc overload corrected\n");
+		fprintf(stderr, "adc overload corrected\n");
 		mir_sdr_GainChangeCallbackMessageReceived();
 	}
 	else
 	{
 		if (verbose)
 		{
-			printf("new gain reduction (%u), lna gain reduction (%u)\n", gRdB, lnaGRdB);
+			fprintf(stderr, "new gain reduction (%u), lna gain reduction (%u)\n", gRdB, lnaGRdB);
 		}
 	}
 }
@@ -261,12 +196,12 @@ void gc_callback(unsigned int gRdB, unsigned int lnaGRdB, void* cbContext)
  *****************
  * Copies data from the SDRPlay RSP. (using 60% of a CPU on Pi2)
  *
- * Writes all samples into a circular buffer in four parts
- * The main thread copies the most recently filled part for processing
+ * Writes all samples into a circular buffer in Sixteen parts
+ * The main thread reads buffers ASAP
  *
  */
 int16_t *circ_buffer = NULL;
-uint32_t buff_now = 0;
+volatile uint32_t buff_now = 0;
 uint32_t buff_offset = 0;
 void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChanged, int rfChanged, int fsChanged, unsigned int numSamples, unsigned int reset, unsigned int hwRemoved, void* cbContext)
 {
@@ -276,7 +211,7 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 
 		// (sample_format == RSP_TCP_SAMPLE_FORMAT_INT16)
 		j = buff_offset;
-		data = &circ_buffer[buff_now * FFT_SIZE * 2];
+		data = &circ_buffer[(buff_now & 15) * FFT_SIZE * 2];
 		for (i = 0; (i < numSamples) && (j < FFT_SIZE * 2); i++) {
 			data[j++] = *xi;
 			data[j++] = *xq;
@@ -288,8 +223,8 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 
 		// need to start a new buffer part
 		buff_offset = 0;
-		buff_now = (buff_now + 1) & 3; // four buffer parts
-		data = &circ_buffer[buff_now * FFT_SIZE * 2];
+		buff_now++;  // sixteen buffer parts
+		data = &circ_buffer[(buff_now & 15) * FFT_SIZE * 2];
 		for (j = buff_offset; (i < numSamples) && (j < FFT_SIZE * 2); i++) {
 			data[j++] = *xi;
 			data[j++] = *xq;
@@ -298,13 +233,73 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 		buff_offset = j;
 	}
 }
+
+
+#define POS(x) (int)(in[i + x])
+// Downsample by 3 / 32 - 2048MHz to 96 Khz
+uint32_t buff_out = 0;
 void get_data()
 {
-	uint32_t line = (buff_now + 3) & 3; // most recently filled
-	fft_buf = &circ_buffer[4 * FFT_SIZE * 2];
+	int i;
+	uint32_t line = buff_out & 15; // get next line
 	int16_t *in = &circ_buffer[line * FFT_SIZE * 2];
-	memcpy(fft_buf, in, FFT_SIZE * 2 * sizeof(int16_t));
-	// could copy extra data to wrap around for window function
+	int16_t *out = fm_buff;
+
+	while (buff_out >= buff_now) {
+		usleep(1000);
+		if (do_exit)
+			return;
+	}
+        // Offset tuning; rotate before downsample: [ 0, 1] [-3, 2] [-4, -5] [7, -6]
+	// xreal[i] = (buf[pos+0] - buf[pos+3] - buf[pos+4] + buf[pos+7]);
+	// yimag[i] = (buf[pos+1] + buf[pos+2] - buf[pos+5] - buf[pos+6]);
+	// Tune to samplerate/4 above target frequency
+	for ( i = 0; (i + 63) < (2 * 2048); /* i+=64 */) {
+		int ia, qa;
+		ia = POS(0) - POS(3) - POS(4) + POS(7);
+		qa = POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;
+		ia += POS(0) - POS(3); // - POS(4) + POS(7);
+		qa += POS(1) + POS(2); // - POS(5) - POS(6);
+		*out++ = ia >> 3;
+		*out++ = qa >> 3;
+
+		// skip a sample
+
+		ia = /* POS(0) - POS(3) - POS(4) */ POS(7);
+		qa = /* POS(1) - POS(2) - POS(5) */-POS(6);
+		i+=8;
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;	// 32 is half way
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;
+		ia += POS(0); // - POS(3) - POS(4) + POS(7);
+		qa += POS(1); // + POS(2) - POS(5) - POS(6);
+		*out++ = ia >> 3;
+		*out++ = qa >> 3;
+
+		// skip a sample
+
+		ia = /* POS(0) - POS(3) */ -POS(4) + POS(7);
+		qa = /* POS(1) - POS(2) */ -POS(5) - POS(6);
+		i+=8;
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8; // 32 is half way
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;	// 32 IQ  samples = 64
+		*out++ = ia >> 3;
+		*out++ = qa >> 3;
+
+		// dont skip a sample
+	}
+	buff_out++;
 }
 
 static rsp_model_t hardware_ver_to_model(int hw_version)
@@ -327,21 +322,41 @@ static rsp_model_t hardware_ver_to_model(int hw_version)
 
 static rsp_band_t frequency_to_band(unsigned int f)
 {
-	if (f < 60000000) {
+	if ( f < 60000000) {
 		return current_antenna_input == 2 ? BAND_AM_HIZ : BAND_AM;
-	} else if (f < 120000000) {
+	}
+	else
+	if (f < 120000000)
+	{
 		return BAND_VHF;
-	} else if (f < 250000000) {
+	}
+	else
+	if (f < 250000000)
+	{
 		return BAND_3;
-	} else if (f < 400000000) {
+	}
+	else
+	if (f < 400000000)
+	{
 		return BAND_X;
-	} else if (f < 420000000) {
+	}
+	else
+	if (f < 420000000)
+	{
 		return SONDE;
-	} else if (f < 1000000000) {
+	}
+	else
+	if (f < 1000000000)
+	{
 		return BAND_45;
-	} else if (f <= 2000000000) {
+	}
+	else
+	if (f <= 2000000000)
+	{
 		return BAND_L;
-	} else {
+	}
+	else
+	{
 		return BAND_UNKNOWN;
 	}
 }
@@ -451,7 +466,7 @@ static int apply_agc_settings()
 
 	r = mir_sdr_AgcControl(agc, agc_set_point, 0, 0, 0, 0, lna_state);
 	if (r != mir_sdr_Success) {
-		printf("agc control error (%d)\n", r);
+		fprintf(stderr, "agc control error (%d)\n", r);
 	}
 
 	return r;
@@ -463,7 +478,7 @@ static int apply_gain_settings()
 
 	r = mir_sdr_RSP_SetGr(gain_reduction, lna_state, 1, 0);
 	if (r != mir_sdr_Success) {
-		printf("set gain reduction error (%d)\n", r);
+		fprintf(stderr, "set gain reduction error (%d)\n", r);
 	}
 
 	return r;
@@ -517,27 +532,27 @@ static int set_bias_t(unsigned int enable)
 	case RSP_MODEL_RSP2:
 		r = mir_sdr_RSPII_BiasTControl(enable);
 		if (r != mir_sdr_Success) {
-			printf("bias-t control error (%d)\n", r);
+			fprintf(stderr, "bias-t control error (%d)\n", r);
 		}
 		break;
 
 	case RSP_MODEL_RSP1A:
 		r = mir_sdr_rsp1a_BiasT(enable);
 		if (r != mir_sdr_Success) {
-			printf("bias-t control error (%d)\n", r);
+			fprintf(stderr, "bias-t control error (%d)\n", r);
 		}
 		break;
 
 	case RSP_MODEL_RSPDUO:
 		r = mir_sdr_rspDuo_BiasT(enable);
 		if (r != mir_sdr_Success) {
-			printf("bias-t control error (%d)\n", r);
+			fprintf(stderr, "bias-t control error (%d)\n", r);
 		}
 		break;
 
 	default:
 		if (verbose) {
-			printf("bias-t not supported\n");
+			fprintf(stderr, "bias-t not supported\n");
 		}
 		break;
 	}
@@ -553,20 +568,20 @@ static int set_refclock_output(unsigned int enable)
 	case RSP_MODEL_RSP2:
 		r = mir_sdr_RSPII_ExternalReferenceControl(enable);
 		if (r != mir_sdr_Success) {
-			printf("external reference control error (%d)\n", r);
+			fprintf(stderr, "external reference control error (%d)\n", r);
 		}
 		break;
 
 	case RSP_MODEL_RSPDUO:
 		r = mir_sdr_rspDuo_ExtRef(enable);
 		if (r != mir_sdr_Success) {
-			printf("external reference control error (%d)\n", r);
+			fprintf(stderr, "external reference control error (%d)\n", r);
 		}
 		break;
 
 	default:
 		if (verbose) {
-			printf("reference clock output not supported\n");
+			fprintf(stderr, "reference clock output not supported\n");
 		}
 		break;
 	}
@@ -587,7 +602,7 @@ static int set_antenna_input(unsigned int antenna)
 			{
 				r = mir_sdr_RSPII_AntennaControl(mir_sdr_RSPII_ANTENNA_A);
 				if (r != mir_sdr_Success) {
-					printf("set antenna input error (%d)\n", r);
+					fprintf(stderr, "set antenna input error (%d)\n", r);
 				}
 			}
 			else
@@ -595,7 +610,7 @@ static int set_antenna_input(unsigned int antenna)
 				{
 					r = mir_sdr_rspDuo_TunerSel(mir_sdr_rspDuo_Tuner_1);
 					if (r != mir_sdr_Success) {
-						printf("set tuner error (%d)\n", r);
+						fprintf(stderr, "set tuner error (%d)\n", r);
 					}
 				}
 
@@ -608,7 +623,7 @@ static int set_antenna_input(unsigned int antenna)
 			{
 				r = mir_sdr_RSPII_AntennaControl(mir_sdr_RSPII_ANTENNA_B);
 				if (r != mir_sdr_Success) {
-					printf("set antenna input error (%d)\n", r);
+					fprintf(stderr, "set antenna input error (%d)\n", r);
 				}
 			}
 			else
@@ -616,7 +631,7 @@ static int set_antenna_input(unsigned int antenna)
 				{
 					r = mir_sdr_rspDuo_TunerSel(mir_sdr_rspDuo_Tuner_2);
 					if (r != mir_sdr_Success) {
-						printf("set tuner error (%d)\n", r);
+						fprintf(stderr, "set tuner error (%d)\n", r);
 					}
 				}
 
@@ -629,7 +644,7 @@ static int set_antenna_input(unsigned int antenna)
 			{
 				r = mir_sdr_rspDuo_TunerSel(mir_sdr_rspDuo_Tuner_1);
 				if (r != mir_sdr_Success) {
-					printf("set tuner error (%d)\n", r);
+					fprintf(stderr, "set tuner error (%d)\n", r);
 				}
 			}
 
@@ -639,7 +654,7 @@ static int set_antenna_input(unsigned int antenna)
 
 		r = mir_sdr_AmPortSelect(new_am_port);
 		if (r != mir_sdr_Success) {
-			printf("set am port select error (%d)\n", r);
+			fprintf(stderr, "set am port select error (%d)\n", r);
 		}
 
 		am_port = new_am_port;
@@ -663,13 +678,13 @@ static int set_antenna_input(unsigned int antenna)
 			lna_state, &infoOverallGr, mir_sdr_USE_RSP_SET_GR,
 			&samples_per_packet, reason);
 		if (r != mir_sdr_Success) {
-			printf("reinit error (%d)\n", r);
+			fprintf(stderr, "reinit error (%d)\n", r);
 		}
 	}
 	else
 	{
 		if (verbose) {
-			printf("antenna input not supported\n");
+			fprintf(stderr, "antenna input not supported\n");
 		}
 	}
 
@@ -690,39 +705,39 @@ static int set_notch_filters(unsigned int notch)
 	case RSP_MODEL_RSP2:
 		r = mir_sdr_RSPII_RfNotchEnable(rf_notch);
 		if (r != mir_sdr_Success) {
-			printf("set rf notch error (%d)\n", r);
+			fprintf(stderr, "set rf notch error (%d)\n", r);
 		}
 		break;
 
 	case RSP_MODEL_RSP1A:
 		r = mir_sdr_rsp1a_DabNotch(dab_notch);
 		if (r != mir_sdr_Success) {
-			printf("set dab notch error (%d)\n", r);
+			fprintf(stderr, "set dab notch error (%d)\n", r);
 		}
 		r = mir_sdr_rsp1a_BroadcastNotch(bc_notch);
 		if (r != mir_sdr_Success) {
-			printf("set broadcast notch error (%d)\n", r);
+			fprintf(stderr, "set broadcast notch error (%d)\n", r);
 		}
 		break;
 
 	case RSP_MODEL_RSPDUO:
 		r = mir_sdr_rspDuo_DabNotch(dab_notch);
 		if (r != mir_sdr_Success) {
-			printf("set dab notch error (%d)\n", r);
+			fprintf(stderr, "set dab notch error (%d)\n", r);
 		}
 		r = mir_sdr_rspDuo_BroadcastNotch(bc_notch);
 		if (r != mir_sdr_Success) {
-			printf("set broadcast notch error (%d)\n", r);
+			fprintf(stderr, "set broadcast notch error (%d)\n", r);
 		}		
 		r = mir_sdr_rspDuo_Tuner1AmNotch(am_notch);
 		if (r != mir_sdr_Success) {
-			printf("set am notch error (%d)\n", r);
+			fprintf(stderr, "set am notch error (%d)\n", r);
 		}
 		break;
 
 	default:
 		if (verbose) {
-			printf("notch filter not supported\n");
+			fprintf(stderr, "notch filter not supported\n");
 		}
 		break;
 	}
@@ -736,12 +751,12 @@ static int set_gain_by_index(unsigned int index)
 	uint8_t if_gr, lnastate;
 
 	if (index > GAIN_STEPS - 1) {
-		printf("gain step %d out of range", index);
+		fprintf(stderr, "gain step %d out of range", index);
 		return 0;
 	}
 
 	if (gain_index_to_gain(index, &if_gr, &lnastate) != 0) {
-		printf("unable to get gain for current band\n");
+		fprintf(stderr, "unable to get gain for current band\n");
 		return 0;
 	}
 
@@ -753,7 +768,7 @@ static int set_gain_by_index(unsigned int index)
 		lna_state, &infoOverallGr, mir_sdr_USE_RSP_SET_GR,
 		&samples_per_packet, mir_sdr_CHANGE_GR);
 	if (r != mir_sdr_Success) {
-		printf("set gain reduction returned (%d)\n", r);
+		fprintf(stderr, "set gain reduction returned (%d)\n", r);
 	}
 
 	apply_agc_settings();
@@ -791,15 +806,15 @@ static int set_tuner_gain_mode(unsigned int mode)
 	if (mode) {
 		r = mir_sdr_AgcControl(mir_sdr_AGC_DISABLE, agc_set_point, 0, 0, 0, 0, lna_state);
 		set_gain_by_index(last_gain_idx);
-		printf("agc disabled\n");
+		fprintf(stderr, "agc disabled\n");
 	}
 	else {
 		r = mir_sdr_AgcControl(mir_sdr_AGC_100HZ, agc_set_point, 0, 0, 0, 0, lna_state);
-		printf("agc enabled\n");
+		fprintf(stderr, "agc enabled\n");
 	}
 
 	if (r != mir_sdr_Success) {
-		printf("tuner gain (agc) control error (%d)\n", r);
+		fprintf(stderr, "tuner gain (agc) control error (%d)\n", r);
 	}
 
 	return r;
@@ -811,7 +826,7 @@ static int set_freq_correction(int32_t corr)
 
 	r = mir_sdr_SetPpm((double)corr);
 	if (r != mir_sdr_Success) {
-		printf("set freq correction error (%d)\n", r);
+		fprintf(stderr, "set freq correction error (%d)\n", r);
 	}
 
 	return r;
@@ -835,7 +850,7 @@ static int set_freq(uint32_t f)
 
 	if (r != mir_sdr_Success) {
 		if (verbose) {
-			printf("set freq returned (%d)\n", r);
+			fprintf(stderr, "set freq returned (%d)\n", r);
 		}
 	}
 
@@ -856,7 +871,7 @@ static int set_sample_rate(uint32_t sr)
 	int decimation;
 
 	if (sr < (2000000 / MAX_DECIMATION_FACTOR) || sr > 10000000) {
-		printf("sample rate %u is not supported\n", sr);
+		fprintf(stderr, "sample rate %u is not supported\n", sr);
 		return -1;
 	}
 
@@ -933,7 +948,7 @@ static int set_sample_rate(uint32_t sr)
 		mir_sdr_DecimateControl(1, decimation, 1);
 	}
 
-	printf("device SR %.2f, decim %d, output SR %u, IF Filter BW %d kHz\n", f, decimation, sr, bwType);
+	fprintf(stderr, "device SR %.2f, decim %d, output SR %u, IF Filter BW %d kHz\n", f, decimation, sr, bwType);
 
 	r = mir_sdr_Reinit(&gain_reduction, (double)f / 1e6, 0, bwType,
 		mir_sdr_IF_Undefined, mir_sdr_LO_Undefined,
@@ -942,7 +957,7 @@ static int set_sample_rate(uint32_t sr)
 		mir_sdr_CHANGE_FS_FREQ | mir_sdr_CHANGE_BW_TYPE);
 
 	if (r != mir_sdr_Success) {
-		printf("set sample rate error (%d)\n", r);
+		fprintf(stderr, "set sample rate error (%d)\n", r);
 	}
 
 	return r;
@@ -986,215 +1001,205 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	return 0;
 }
 
+/**********************************/
 
-float real_conj(int16_t real, int16_t imag)
-/* real(n * conj(n)) */
+void push_to_file()
 {
-	return ((float)real*(float)real + (float)imag*(float)imag);
-}
+	static int ptr = 0;
 
-
-
-void remove_dc(int16_t *data, int length)
-/* works on interleaved data */
-{
-	int i;
-	int16_t ave;
-	long sum = 0L;
-	for (i=0; i < length; i+=2) {
-		sum += data[i];
-	}
-	ave = (int16_t)(sum / (long)(length));
-	if (ave == 0) {
-		return;}
-	for (i=0; i < length; i+=2) {
-		data[i] -= ave;
+	memcpy( &result48[ptr * LEN_FM_N], fm_buff, LEN_FM_N * sizeof(int16_t) );
+	ptr++;
+	if (ptr > 9) {
+		ptr = 0;
+		fwrite(result48, 2, LEN_OUT, file);
 	}
 }
 
-/* FFT based on fix_fft.c by Roberts, Slaney and Bouras
-   http://www.jjj.de/fft/fftpage.html
-   16 bit ints for everything
-   -32768..+32768 maps to -1.0..+1.0
-*/
-
-int sine_table()
+// inplace downsample interleaved IQ data
+void quartersampleIQ(int16_t *data, int length)
 {
-	int i;
-	double d;
-	LOG2_N_WAVE = FFT_INDEX;
-	N_WAVE = 1 << LOG2_N_WAVE;
-	Sinewave = malloc(sizeof(int16_t) * N_WAVE);
-	if (!Sinewave)
-		return 0;
-
-	for (i=0; i<N_WAVE; i++)
-	{
-		d = (double)i * 2.0 * M_PI / N_WAVE;
-		Sinewave[i] = (int)round(32767*sin(d));
-		//printf("%i\n", Sinewave[i]);
-	}
-	return 1;
-}
-
-inline int16_t FIX_MPY(int16_t a, int16_t b)
-/* fixed point multiply and scale */
-{
-	int c = ((int)a * (int)b) >> 14;
-	b = c & 0x01;
-	return (c >> 1) + b;
-}
-
-
-int fix_fft(int16_t iq[])
-/* interleaved iq[], 0 <= n < 2**m, changes in place */
-{
-	int mr, nn, i, j, l, k, istep, n, shift;
-	int16_t qr, qi, tr, ti, wr, wi;
-	int m = FFT_INDEX;
-	n = 1 << m;
-	if (n > N_WAVE)
-		{return -1;}
-	mr = 0;
-	nn = n - 1;
-	/* decimation in time - re-order data */
-	for (m=1; m<=nn; ++m) {
-		l = n;
-		do
-			{l >>= 1;}
-		while (mr+l > nn);
-		mr = (mr & (l-1)) + l;
-		if (mr <= m)
-			{continue;}
-		// real = 2*m, imag = 2*m+1
-		tr = iq[2*m];
-		iq[2*m] = iq[2*mr];
-		iq[2*mr] = tr;
-		ti = iq[2*m+1];
-		iq[2*m+1] = iq[2*mr+1];
-		iq[2*mr+1] = ti;
-	}
-	l = 1;
-	k = LOG2_N_WAVE-1;
-	while (l < n) {
-		shift = 1;
-		istep = l << 1;
-		for (m=0; m<l; ++m) {
-			j = m << k;
-			wr =  Sinewave[j+N_WAVE/4];
-			wi = -Sinewave[j];
-			if (shift) {
-				wr >>= 1; wi >>= 1;}
-			for (i=m; i<n; i+=istep) {
-				j = i + l;
-				tr = FIX_MPY(wr,iq[2*j]) - FIX_MPY(wi,iq[2*j+1]);
-				ti = FIX_MPY(wr,iq[2*j+1]) + FIX_MPY(wi,iq[2*j]);
-				qr = iq[2*i];
-				qi = iq[2*i+1];
-				if (shift) {
-					qr >>= 1; qi >>= 1;}
-				iq[2*j] = qr - tr;
-				iq[2*j+1] = qi - ti;
-				iq[2*i] = qr + tr;
-				iq[2*i+1] = qi + ti;
-			}
-		}
-		--k;
-		l = istep;
-	}
-	return 0;
-}
-
-void scanner(void)
-{
-	int i, j, j2, f, n_read, bin_len, buf_len;
-	int32_t w;
-	buf_len = FFT_SIZE * 2;
-	bin_len = FFT_SIZE;
-	// single pass for now
-	{
-		get_data(); // update fft_buff
-		// TODO: window function may improve quality
-		samples++;
-
-		fix_fft(fft_buf);
-
-		if (!peak_hold) {
-			for (j=0; j<bin_len; j++) {
-				avg[j] += real_conj(fft_buf[j*2], fft_buf[j*2+1]);
-			}
-		} else {
-			for (j=0; j<bin_len; j++) {
-				avg[j] = MAX(real_conj(fft_buf[j*2], fft_buf[j*2+1]), avg[j]);
-			}
-		}
+	int i, f;
+	for (i = 0; (i*4) < (2 * length - 7); i++) {
+		f = i * 4;
+		data[i] = ((int)data[f] + 2 * ((int)data[f + 2] + data[f + 4])
+			+ data[f + 6] ) >> 3;
+		f++; i++;
+		data[i] = ((int)data[f] + 2 * ((int)data[f + 2] + data[f + 4])
+			+ data[f + 6] ) >> 3;
 	}
 }
 
-void csv_dbm()
+// inplace downsample single channel data
+void quartersample(int16_t *data, int length)
 {
-	int i, len, ds, i1, i2, bw2, bin_count;
-	float tmp;
-	double dbm;
-	len = FFT_SIZE;
-	/* fix FFT stuff quirks */
-	/* nuke DC component (not effective for all windows) */
-	avg[0] = avg[1];
-	/* FFT is translated by 180 degrees */
-	for (i=0; i<len/2; i++) {
-		tmp = avg[i];
-		avg[i] = avg[i+len/2];
-		avg[i+len/2] = tmp;
+	int i, f;
+	for (i = 0; (i*4)<(length - 3); i++) {
+		f = i * 4;
+		data[i] = ((int)data[f] + 2 * ((int)data[f + 1]+ data[f + 2])
+			+ data[f + 3] ) >> 3;
 	}
-
-	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
-	bw2 = (int)((double)rate * 0.5 * (1.0 - crop));
-	fprintf(file, "%i, %i, %0.2f, %i", freq - bw2, freq + bw2,
-		(double)rate / (double)len, samples);
-
-	i1 = (int)((double)len * 0.5 *  crop);
-	i2 = len - i1;
-	for (i = i1; i < i2; i++) {
-		dbm  = (double)avg[i] / ((double)rate * (double)samples);
-		dbm  = 10 * log10(dbm);
-		fprintf(file, ", %.2f", dbm);
-	}
-	fprintf(file, "\n");
-	for (i = 0; i < len; i++)
-		avg[i] = 0.0f;
-	samples = 0;
 }
 
-// Keep it simple. rtl_power combines multiple overlapping bandwidths with variable resolution.
-// For now we will sample 2.048 Mhz at 1 kHz resolution, for  2048 samples per FFT
+void multiply(int ar, int aj, int br, int bj, int *cr, int *cj)
+{
+	*cr = ar*br - aj*bj;
+	*cj = aj*br + ar*bj;
+}
+
+int16_t polar_disc(int ar, int aj, int br, int bj)
+{
+	int cr, cj;
+	double angle;
+
+	// multiply(ar, aj, br, -bj, &cr, &cj);
+	cr = ar*br + aj*bj;
+	cj = aj*br - ar*bj;
+
+	angle = atan2((double)cj, (double)cr);
+	return (int16_t)(angle * (1 << 14) / 3.2);
+}
+
+int fm_pre_r, fm_pre_j;
+void fm_demod(int wide)
+{
+	int i, len;
+	int16_t temp;
+	int16_t *lp = fm_buff;
+	int16_t *r = fm_buff;
+
+	if (wide) {
+		len = LEN_FM_W;
+	} else {
+		quartersampleIQ(lp, LEN_FM_W);
+		len = LEN_FM_N;
+	}
+
+	// inplace demod, protect first sample
+	temp = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
+	r[1] = polar_disc(lp[2], lp[3], lp[0], lp[1]);
+	r[0] = temp;
+
+	for (i = 2; i < len; i++) {
+		r[i] = polar_disc(lp[i*2], lp[i*2+1], lp[i*2-2], lp[i*2-1]);
+	}
+	fm_pre_r = lp[2 * len - 2];
+	fm_pre_j = lp[2 * len - 1];
+
+	if (wide)
+		quartersample(r, LEN_FM_W);
+
+	push_to_file();
+}
+
+void usb_demod()
+{
+	int i, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+	for (i = 0; i < LEN_FM_N; i ++) {
+		pcm = ((int)lp[i*2] + lp[i*2+1]);
+		r[i] = pcm >> 1;
+	}
+	push_to_file();
+}
+
+void lsb_demod()
+{
+	int i, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+	for (i = 0; i < LEN_FM_N; i ++) {
+		pcm = ((int)lp[i*2] - lp[i*2+1]);
+		r[i] = pcm >> 1;
+	}
+	push_to_file();
+}
+
+void am_demod()
+{
+	int i, pcm;
+	float f;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+	for (i = 0; i < LEN_FM_N; i ++) {
+		f = sqrtf(lp[i*2]*lp[i*2] + lp[i*2+1]*lp[i*2+1]);
+		r[i] = (int)(f * 0.7f);
+	}
+	push_to_file();
+}
+
+void raw_out()
+{
+	int i, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+
+	push_to_file();
+	memcpy(r, &lp[LEN_FM_N], LEN_FM_N * sizeof(int16_t));
+	push_to_file();
+}
+
+void generate_header(int samplerate)
+{
+	int i, s_rate, b_rate;
+	char *channels = "\1\0";
+	char *align = "\2\0";
+	uint8_t samp_rate[4] = {0, 0, 0, 0};
+	uint8_t byte_rate[4] = {0, 0, 0, 0};
+	s_rate = samplerate;
+	b_rate = s_rate * 2;
+	if (mode_demod == MODE_RAW) {
+		channels = "\2\0";
+		align = "\4\0";
+		b_rate *= 2;
+	}
+	for (i=0; i<4; i++) {
+		samp_rate[i] = (uint8_t)((s_rate >> (8*i)) & 0xFF);
+		byte_rate[i] = (uint8_t)((b_rate >> (8*i)) & 0xFF);
+	}
+	fwrite("RIFF",     1, 4, file);
+	fwrite("\xFF\xFF\xFF\xFF", 1, 4, file);  /* size */
+	fwrite("WAVE",     1, 4, file);
+	fwrite("fmt ",     1, 4, file);
+	fwrite("\x10\0\0\0", 1, 4, file);  /* size */
+	fwrite("\1\0",     1, 2, file);  /* pcm */
+	fwrite(channels,   1, 2, file);
+	fwrite(samp_rate,  1, 4, file);
+	fwrite(byte_rate,  1, 4, file);
+	fwrite(align, 1, 2, file);
+	fwrite("\x10\0",     1, 2, file);  /* bits per channel */
+	fwrite("data",     1, 4, file);
+	fwrite("\xFF\xFF\xFF\xFF", 1, 4, file);  /* size */
+}
+
+
+// Sample 2.048 Mhz, take FM at 192k wide, or 48k narrow
 void usage(void)
 {
-	printf("rsp_power, a minimal rtl_power implementation for SDRPlay receivers."
+	printf("rsp_fm, a minimal rtl_fm implementation for SDRPlay receivers."
 		"\n\n"
-		"Usage: rsp_power -f 433M:435M:1000 [options] filename\n"
-		"\t[-f low:high:step frequency to sample [Hz]]\n"
+		"Usage: rsp_fm -f 88.5M [options] filename\n"
+		"\t[-f frequency (no scanning support)]\n"
 		"\t[-g gain (0.0 to 56.0, default: 32)]\n"
-		"\t[-i integration_interval (default: 10 seconds)]\n"
-		"\t[-1 enables single-shot mode (default: off)]\n"
-		"\t[-e exit_timer (default: off/0)]\n"
-		"\t[-c crop (default: 20%%, recommended: up to 50%%)]\n"
-		"\t ( discards data at the edges: 0%% keeps full bandwidth )\n"
+		"\t[-W sets wideband, for broadcast FM]\n"
 		"\n"
-		"\t[-S samplerate (use wih caution)]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-A Antenna Port select* (0/1/2, default: 0, Port A)]\n"
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
-		"\tfilename (a '-' dumps samples to stdout)\n"
-		"\t (omitting the filename also uses stdout)\n"
 		"\n"
+		"\t Writes samples to file with a WAV header\n"
+		"\t (** only supports 48kHz output **)\n"
+		"\n rsp_fm -f 88.5M -W | aplay"
 		"\n"
-		"\t[TODO:]\n"
-		"\t[\t cropping not implemented (Bandwidth = Samplerate)]\n"
-		"\t[\t combine multiple Bandwidths into one scan]\n"
-		"\t[\t stepsize ignored, defaults to Bandwidth/2048]\n"
-		"\t[\t window function not implemented (rectangular)]\n"
-		"\t[\t smoothing not implemented]\n"
 		"\n"
 	      );
 		exit(1);
@@ -1202,10 +1207,8 @@ void usage(void)
 
 int main(int argc, char **argv)
 {
-	char *filename = "power.dump";
 	int length, r, opt, wb_mode = 0;
-	uint32_t frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
-	uint32_t i, bandwidth = DEFAULT_SAMPLERATE;
+	uint32_t i, frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
 
 	float ver;
 	mir_sdr_DeviceT devices[MAX_DEVS];
@@ -1218,52 +1221,31 @@ int main(int argc, char **argv)
 	int enable_refout = 0;
 	int bit_depth = 16;
 	int gain = DEFAULT_GAIN;
-
-	time_t next_tick;
-	time_t time_now;
-	time_t exit_time = 0;
-	char t_str[50];
-	struct tm *cal_time;
-	int interval = 5;
+	int widefm = 0;
 
 	struct sigaction sigact, sigign;
+	char *filename;
 
-	int single = 0;
+	fprintf(stderr, "rsp_fm V%d.%d\n\n", RSP_FM_VERSION_MAJOR, RSP_FM_VERSION_MINOR);
 
-	// printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
-
-	while ((opt = getopt(argc, argv, "f:i:e:c:g:A:S:s:w:d:P:p:F:Tt:R1DO")) != -1) {
+	while ((opt = getopt(argc, argv, "f:g:A:d:P:p:F:M:WTRDOW")) != -1) {
 		switch (opt) {
-		case 'f':
-			frequency = get_frequency(optarg);
-			break;
-		case 'i':
-			interval = (int)round(atoft(optarg));
-			break;
-		case 'e':
-			exit_time = (time_t)((int)round(atoft(optarg)));
-			break;
-		case 'c':
-			crop = atofp(optarg);
+		case 'd':
+			device = atoi(optarg) - 1;
 			break;
 		case 'g':
-			// Range is 0 - 28 instead of 0 - 50 for rtl_sdr
+			//gain range is 0 - 28 instead of 0.0 to 50.0 for rtl_sdr
 			gain = (int)(atof(optarg) / 2.0);
+			if (gain < 0) { // autogain request
+				gain = DEFAULT_GAIN;
+			} else if (gain > MAX_GAIN) // out of range
+				gain = MAX_GAIN;
 			break;
 		case 'A':
 			antenna = atoi(optarg);
 			break;
-		case 's':
-			// smoothing not implemented;
-			break;
-		case 'S':
-			samp_rate = (uint32_t)atoi(optarg);
-			break;
-		case 'w':
-			// windowing not implemented;
-			break;
-		case 'd':
-			device = atoi(optarg) - 1;
+		case 'f':
+			frequency = (uint32_t)atofs(optarg);
 			break;
 		case 'T':
 			enable_biastee = 1;
@@ -1271,17 +1253,8 @@ int main(int argc, char **argv)
 		case 'R':
 			enable_refout = 1;
 			break;
-		case 't':
-			// fft_threads = atoi(optarg);
-			break;
 		case 'p':
 			// ppm_error = atoi(optarg);
-			break;
-		case '1':
-			single = 1;
-			break;
-		case 'P':
-			peak_hold = 1;
 			break;
 		case 'D':
 			// direct_sampling = 1;
@@ -1290,6 +1263,23 @@ int main(int argc, char **argv)
 		case 'F':
 			// comp_fir_size = atoi(optarg);
 			break;
+		case 'M':
+			if (strcmp("fm",  optarg) == 0) {
+				mode_demod = MODE_FM;	}
+			else if (strcmp("raw",  optarg) == 0) {
+				mode_demod = MODE_RAW;	}
+			else if (strcmp("am",  optarg) == 0) {
+				mode_demod = MODE_AM;	}
+			else if (strcmp("usb", optarg) == 0) {
+				mode_demod = MODE_USB;	}
+			else if (strcmp("lsb", optarg) == 0) {
+				mode_demod = MODE_LSB;	}
+			else if (strcmp("wbfm",  optarg) == 0) {
+				widefm = 1;	}
+			break;
+		case 'W':
+			widefm = 1;
+			break;
 		case 'h':
 		default:
 			usage();
@@ -1297,39 +1287,35 @@ int main(int argc, char **argv)
 		}
 	}
 
-	freq = frequency;
-	rate = samp_rate;
-	samples = 0;
-	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
-
-	if (gain < 0) {// autogain request
-		gain = DEFAULT_GAIN;
-	} else if (gain > MAX_GAIN) // out of range
-		gain = MAX_GAIN;
-
-	if ((crop < 0.0) || (crop >= 0.99))
-		crop = 0.2;
-
 	if (argc <= optind) {
-		filename = "-";
+		file = stdout;
 	} else {
 		filename = argv[optind];
+		file = fopen(filename, "wb");
+		if (!file) {
+			fprintf(stderr, "Failed to open %s\n", filename);
+			exit(1);
+		}
 	}
+
+	offset_freq = frequency + (samp_rate >> 2); // offset tuning
+	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
+	generate_header(48000);
 
 	// check API version
 	r = mir_sdr_ApiVersion(&ver);
 	if (ver != MIR_SDR_API_VERSION) {
 		//  Error detected, include file does not match dll. Deal with error condition.
-		printf("library libmirsdrapi-rsp must be version %.2f\n", ver);
+		fprintf(stderr, "library libmirsdrapi-rsp must be version %.2f\n", ver);
 		exit(1);
 	}
-	// printf("libmirsdrapi-rsp version %.2f found\n", ver);
-
+	// fprintf(stderr, "libmirsdrapi-rsp version %.2f found\n", ver);
+#if 0
 	// enable debug output
 	if (verbose) {
 		mir_sdr_DebugEnable(1);
 	}
-
+#endif
 	// select RSP device
 	r = mir_sdr_GetDevices(&devices[0], &numDevs, MAX_DEVS);
 	if (r != mir_sdr_Success) {
@@ -1365,14 +1351,14 @@ int main(int argc, char **argv)
 	hardware_caps = model_to_capabilities(hardware_model);
 
 	if (hardware_model == RSP_MODEL_UNKNOWN || hardware_caps == NULL) {
-		printf("unknown RSP model (hw ver %d)\n", hardware_version);
+		fprintf(stderr, "unknown RSP model (hw ver %d)\n", hardware_version);
 	}
 	else {
-		// printf("detected RSP model '%s' (hw ver %d)\n", model_to_string(hardware_model), hardware_version);
+		fprintf(stderr, "detected RSP model '%s' (hw ver %d)\n", model_to_string(hardware_model), hardware_version);
 	}
 
 	// enable DC offset and IQ imbalance correction
-	mir_sdr_DCoffsetIQimbalanceControl(0, 0);
+	mir_sdr_DCoffsetIQimbalanceControl(1, 1);
 	// disable decimation and  set decimation factor to 1
 	mir_sdr_DecimateControl(0, 1, 0);
 
@@ -1385,64 +1371,29 @@ int main(int argc, char **argv)
 	sigaction(SIGQUIT, &sigact, NULL);
 	sigaction(SIGPIPE, &sigign, NULL);
 
-	if (strcmp(filename, "-") == 0) { /* Write log to stdout */
-		file = stdout;
-	} else {
-		file = fopen(filename, "wb");
-		if (!file) {
-			fprintf(stderr, "Failed to open %s\n", filename);
-			goto out;
-		}
-	}
-
-	// allocate 5 buffers for 16 bit IQ samples
-	circ_buffer = calloc(5, FFT_SIZE * 2 * sizeof(int16_t));
+	// allocate 16 buffers for 16 bit IQ samples
+	circ_buffer = calloc(16, FFT_SIZE * 2 * sizeof(int16_t));
 
 	// initialise API and start the rx
-	r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
+	r = init_rsp_device(samp_rate, offset_freq, enable_biastee, notch, enable_refout, antenna, gain);
 	if (r != 0) {
-		printf("failed to initialise RSP device\n");
+		fprintf(stderr, "failed to initialise RSP device\n");
 		goto out;
 	}
 
-	usleep(5000); // allow time for initial buffers to fill, and sdr to "settle"
-	next_tick = time(NULL) + interval;
-	if (exit_time) {
-		exit_time = time(NULL) + exit_time;}
-
-	if (!sine_table())
-		goto out;
-
-	avg = (float*)malloc(FFT_SIZE * sizeof(float));
-	if (!avg)
-		goto out;
-	for (i=0; i<FFT_SIZE; i++)
-		avg[i] = 0.0f;
-
 	while (!do_exit) {
-		scanner();
-		// running close to real time on a Pi2, so slow things down a bit
-		usleep(1000);
-		time_now = time(NULL);
-		if (time_now < next_tick)
-			continue;
-		// loop within each time interval
-
-		// then dump to file
-		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
-		cal_time = localtime(&time_now);
-		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
-
-		fprintf(file, "%s, ", t_str);
-		csv_dbm();
-
-		fflush(file);
-		if (single)
-			do_exit = 1;
-		if (exit_time && time(NULL) >= exit_time)
-			do_exit = 1;
-		while (time(NULL) >= next_tick)
-			next_tick += interval;
+		get_data();
+		if (mode_demod == MODE_FM) {
+			fm_demod(widefm);
+		} else if (mode_demod == MODE_USB) {
+			usb_demod();
+		} else if (mode_demod == MODE_LSB) {
+			lsb_demod();
+		} else if (mode_demod == MODE_AM) {
+			am_demod();
+		} else {
+			raw_out(); // MODE_RAW
+		}
 	}
 
 out:
@@ -1451,12 +1402,8 @@ out:
 	mir_sdr_StreamUninit();
 	mir_sdr_ReleaseDeviceIdx();
 
-	if (avg)
-		free(avg);
 	if (circ_buffer)
 		free(circ_buffer);
-	if (Sinewave)
-	       free(Sinewave);
 
 	return 0;
 }
