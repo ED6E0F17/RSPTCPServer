@@ -75,7 +75,8 @@ typedef enum {
 	BAND_X = 4,
 	BAND_45 = 5,
 	BAND_L = 6,
-	BAND_AM_HIZ = 7
+	BAND_AM_HIZ = 7,
+	SONDE = 8
 } rsp_band_t;
 
 typedef struct {
