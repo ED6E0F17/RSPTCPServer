@@ -37,10 +37,11 @@
 // temporary fixed resolution of 2.048 Mhz / 1 kHz = 2048 IQ samples
 #define FFT_INDEX (11)
 #define FFT_SIZE (2048)
+#define FM_LEN_W (3 * FFT_SIZE / 32 )
+#define FM_LEN_N (FM_LEN_W >> 2)
+// buffer sizes: 2048 IQ -> 196 IQ -> (48 IQ) -> 48 MONO  -> 480 OUT
+
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
-
-
-FILE *file;
 
 int16_t* IQ = NULL;
 int16_t fm_buf[192 * 2];
@@ -930,210 +931,131 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	return 0;
 }
 
+/**********************************/
+// buffer sizes: 2048 IQ -> 196 IQ -> (196 mono or 48 IQ) -> 48 mono  -> 480 OUT
 
-float real_conj(int16_t real, int16_t imag)
-/* real(n * conj(n)) */
+#define LEN_FM_W (3 * FFT_SIZE / 32 )
+#define LEN_FM_N (FM_LEN_W >> 2)
+
+int	fm_pre_r, fm_pre_j;
+
+// IQ input, 196 sample pairs
+// audio output, may be 196 samples in wideband
+int16_t	result48[LEN_FM_W];
+int16_t fm_buff[LEN_FM_W];
+
+void push_to_stdout()
 {
-	return ((float)real*(float)real + (float)imag*(float)imag);
+	// count to ten before pushing
 }
 
-#if 0
-
-void remove_dc(int16_t *data, int length)
-/* works on interleaved data */
+// inplace downsample interleaved IQ data
+void quartersampleIQ(int16_t *data, int length)
 {
-	int i;
-	int16_t ave;
-	long sum = 0L;
-	for (i=0; i < length; i+=2) {
-		sum += data[i];
-	}
-	ave = (int16_t)(sum / (long)(length));
-	if (ave == 0) {
-		return;}
-	for (i=0; i < length; i+=2) {
-		data[i] -= ave;
-	}
-}
-
-/* FFT based on fix_fft.c by Roberts, Slaney and Bouras
-   http://www.jjj.de/fft/fftpage.html
-   16 bit ints for everything
-   -32768..+32768 maps to -1.0..+1.0
-*/
-
-int sine_table()
-{
-	int i;
-	double d;
-	LOG2_N_WAVE = FFT_INDEX;
-	N_WAVE = 1 << LOG2_N_WAVE;
-	Sinewave = malloc(sizeof(int16_t) * N_WAVE);
-	if (!Sinewave)
-		return 0;
-
-	for (i=0; i<N_WAVE; i++)
-	{
-		d = (double)i * 2.0 * M_PI / N_WAVE;
-		Sinewave[i] = (int)round(32767*sin(d));
-		//printf("%i\n", Sinewave[i]);
-	}
-	return 1;
-}
-
-inline int16_t FIX_MPY(int16_t a, int16_t b)
-/* fixed point multiply and scale */
-{
-	int c = ((int)a * (int)b) >> 14;
-	b = c & 0x01;
-	return (c >> 1) + b;
-}
-
-
-int fix_fft(int16_t iq[])
-/* interleaved iq[], 0 <= n < 2**m, changes in place */
-{
-	int mr, nn, i, j, l, k, istep, n, shift;
-	int16_t qr, qi, tr, ti, wr, wi;
-	int m = FFT_INDEX;
-	n = 1 << m;
-	if (n > N_WAVE)
-		{return -1;}
-	mr = 0;
-	nn = n - 1;
-	/* decimation in time - re-order data */
-	for (m=1; m<=nn; ++m) {
-		l = n;
-		do
-			{l >>= 1;}
-		while (mr+l > nn);
-		mr = (mr & (l-1)) + l;
-		if (mr <= m)
-			{continue;}
-		// real = 2*m, imag = 2*m+1
-		tr = iq[2*m];
-		iq[2*m] = iq[2*mr];
-		iq[2*mr] = tr;
-		ti = iq[2*m+1];
-		iq[2*m+1] = iq[2*mr+1];
-		iq[2*mr+1] = ti;
-	}
-	l = 1;
-	k = LOG2_N_WAVE-1;
-	while (l < n) {
-		shift = 1;
-		istep = l << 1;
-		for (m=0; m<l; ++m) {
-			j = m << k;
-			wr =  Sinewave[j+N_WAVE/4];
-			wi = -Sinewave[j];
-			if (shift) {
-				wr >>= 1; wi >>= 1;}
-			for (i=m; i<n; i+=istep) {
-				j = i + l;
-				tr = FIX_MPY(wr,iq[2*j]) - FIX_MPY(wi,iq[2*j+1]);
-				ti = FIX_MPY(wr,iq[2*j+1]) + FIX_MPY(wi,iq[2*j]);
-				qr = iq[2*i];
-				qi = iq[2*i+1];
-				if (shift) {
-					qr >>= 1; qi >>= 1;}
-				iq[2*j] = qr - tr;
-				iq[2*j+1] = qi - ti;
-				iq[2*i] = qr + tr;
-				iq[2*i+1] = qi + ti;
-			}
-		}
-		--k;
-		l = istep;
-	}
-	return 0;
-}
-
-void scanner(void)
-{
-	int i, j, j2, f, n_read, bin_len, buf_len;
-	int32_t w;
-	buf_len = FFT_SIZE * 2;
-	bin_len = FFT_SIZE;
-	// single pass for now
-	{
-		get_data(); // update fft_buff
-		// TODO: window function may improve quality
-		samples++;
-
-		fix_fft(fft_buf);
-
-		if (!peak_hold) {
-			for (j=0; j<bin_len; j++) {
-				avg[j] += real_conj(fft_buf[j*2], fft_buf[j*2+1]);
-			}
-		} else {
-			for (j=0; j<bin_len; j++) {
-				avg[j] = MAX(real_conj(fft_buf[j*2], fft_buf[j*2+1]), avg[j]);
-			}
-		}
+	int i, f;
+	for (i = 0; (i*4) < (2 * length - 7); i++) {
+		f = i * 4;
+		data[i] = (data[f] + 2 * (data[f + 2] + data[f + 4])
+			+ data[f + 6] ) >> 3;
+		f++; i++;
+		data[i] = ( data[f] + 2 * (data[f + 2] + data[f + 4])
+			+ data[f + 6] ) >> 3;
 	}
 }
 
-void csv_dbm()
+// inplace downsample single channel data
+void quartersample(int16_t *data, int length)
 {
-	int i, len, ds, i1, i2, bw2, bin_count;
-	float tmp;
-	double dbm;
-	len = FFT_SIZE;
-	/* fix FFT stuff quirks */
-	/* nuke DC component (not effective for all windows) */
-	avg[0] = avg[1];
-	/* FFT is translated by 180 degrees */
-	for (i=0; i<len/2; i++) {
-		tmp = avg[i];
-		avg[i] = avg[i+len/2];
-		avg[i+len/2] = tmp;
+	int i, f;
+	for (i = 0; (i*4)<(length - 3); i++) {
+		f = i * 4;
+		data[i] = (data[f] + 2 * (data[f + 1]+ data[f + 2])
+			+ data[f + 3] ) >> 3;
 	}
-
-	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
-	bin_count = len;
-	bw2 = (int)(((double)rate * (double)bin_count) / (len * 2));
-	fprintf(file, "%i, %i, %.2f, %i, ", freq - bw2, freq + bw2,
-		(double)rate / (double)len, samples);
-
-	i1 = 0; // + (int)((double)len * ts->crop * 0.5);
-	i2 = (len-1); // - (int)((double)len * ts->crop * 0.5);
-	for (i=i1; i<=i2; i++) {
-		dbm  = (double)avg[i];
-		dbm /= (double)rate;
-		dbm /= (double)samples;
-		dbm  = 10 * log10(dbm);
-		fprintf(file, "%.2f, ", dbm);
-	}
-	dbm = (double)avg[i2] / ((double)rate * (double)samples);
-	dbm  = 10 * log10(dbm);
-	fprintf(file, "%.2f\n", dbm);
-	for (i=0; i<len; i++)
-		avg[i] = 0.0f;
-	samples = 0;
 }
-#endif
+
+void multiply(int ar, int aj, int br, int bj, int *cr, int *cj)
+{
+	*cr = ar*br - aj*bj;
+	*cj = aj*br + ar*bj;
+}
+
+int polar_disc(int ar, int aj, int br, int bj)
+{
+	int cr, cj;
+	double angle;
+
+	// multiply(ar, aj, br, -bj, &cr, &cj);
+	cr = ar*br + aj*bj;
+	cj = aj*br - ar*bj;
+
+	angle = atan2((double)cj, (double)cr);
+	return (int)(angle * (1 << 14) / 3.2);
+}
+
+void fm_demod(int wide)
+{
+	int i, len, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r = result48;
+
+	if (wide) {
+		len = LEN_FM_W;
+	} else {
+		quartersampleIQ(r, LEN_FM_W);
+		len = LEN_FM_N;
+	}
+
+	pcm = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
+	r[0] = (int16_t)pcm;
+
+	for (i = 1; i < len / 2; i++) {
+		pcm = polar_disc(lp[i*2], lp[i*2+1], lp[i*2-2], lp[i*2-1]);
+		r[i] = (int16_t)pcm;
+	}
+	fm_pre_r = lp[len - 2];
+	fm_pre_j = lp[len - 1];
+
+	if (wide)
+		quartersample(r, LEN_FM_W);
+
+	push_to_stdout();
+}
+
+void usb_demod()
+{
+	int i, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r  = result48;
+
+	quartersampleIQ(r, LEN_FM_W);
+	for (i = 0; i < LEN_FM_N / 2; i ++) {
+		pcm = (lp[i*2] + lp[i*2+1]);
+		r[i] = pcm >> 2;
+	}
+	push_to_stdout();
+}
+
 
 // Sample 2.048 Mhz, take FM at 192k wide, or 48k narrow
 void usage(void)
 {
 	printf("rsp_fm, a minimal rtl_fm implementation for SDRPlay receivers."
 		"\n\n"
-		"Usage: rsp_power -f 433M:435M:1000 [options] filename\n"
+		"Usage: rsp_fm -f 88.5M [options]\n"
 		"\t[-f frequency (no scanning support)]\n"
 		"\t[-g gain (0.0 to 56.0, default: 32)]\n"
+		"\t[-W sets wideband, for broadcast FM]\n"
 		"\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-A Antenna Port select* (0/1/2, default: 0, Port A)]\n"
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
+		"\n"
 		"\t dumps samples to stdout with a WAV header\n"
+		"\t (only supports 48kHz output)\n"
+		"\n rsp_fm -f 88.5M -W | aplay"
 		"\n"
-		"\n"
-		"\t[TODO:]\n"
-		"\t[\t ]\n"
-		"\t[\t ]\n"
 		"\n"
 	      );
 		exit(1);
