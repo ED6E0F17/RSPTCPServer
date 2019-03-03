@@ -119,6 +119,7 @@ static volatile int do_exit = 0;
 #define DEFAULT_AGC_STATE 0
 #define RTLSDR_TUNER_R820T 5
 #define DEFAULT_GAIN 16;
+#define MAX_GAIN (GAIN_STEPS - 1)
 
 static int bwType = DEFAULT_BW_T;
 static int infoOverallGr;
@@ -250,31 +251,36 @@ static rsp_model_t hardware_ver_to_model(int hw_version)
 
 static rsp_band_t frequency_to_band(unsigned int f)
 {
-	if (/*f >= 0 &&*/ f < 60000000) {
+	if ( f < 60000000) {
 		return current_antenna_input == 2 ? BAND_AM_HIZ : BAND_AM;
 	}
 	else
-	if (f >= 60000000 && f < 120000000)
+	if (f < 120000000)
 	{
 		return BAND_VHF;
 	}
 	else
-	if (f >= 120000000 && f < 250000000)
+	if (f < 250000000)
 	{
 		return BAND_3;
 	}
 	else
-	if (f >= 250000000 && f < 420000000)
+	if (f < 400000000)
 	{
 		return BAND_X;
 	}
 	else
-	if (f >= 420000000 && f < 1000000000)
+	if (f < 420000000)
+	{
+		return SONDE;
+	}
+	else
+	if (f < 1000000000)
 	{
 		return BAND_45;
 	}
 	else
-	if (f >= 1000000000 && f <= 2000000000)
+	if (f <= 2000000000)
 	{
 		return BAND_L;
 	}
@@ -347,6 +353,7 @@ static int gain_index_to_gain(unsigned int index, uint8_t *if_gr_out, uint8_t *l
 		lnastates = hardware_caps->bandx_lna_states;
 		break;
 
+	case SONDE:
 	case BAND_45:
 		if_gains = hardware_caps->band45_if_gains;
 		lnastates = hardware_caps->band45_lna_states;
@@ -1115,7 +1122,7 @@ void usage(void)
 		"\n\n"
 		"Usage: rsp_power -f 433M:435M:1000 [options] filename\n"
 		"\t[-f frequency (no scanning support)]\n"
-		"\t[-g gain (0.0 to 50.0, default: 32)]\n"
+		"\t[-g gain (0.0 to 56.0, default: 32)]\n"
 		"\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-A Antenna Port select* (0/1/2, default: 0, Port A)]\n"
@@ -1159,12 +1166,12 @@ int main(int argc, char **argv)
 			device = atoi(optarg) - 1;
 			break;
 		case 'g':
-			//gain range is 0 - 28 instead of 0.0 to 50.0
+			//gain range is 0 - 28 instead of 0.0 to 50.0 for rtl_sdr
 			gain = (int)(atof(optarg) / 2.0);
-			if (gain < 0) {// autogain request
+			if (gain < 0) { // autogain request
 				gain = DEFAULT_GAIN;
-			}else if (gain > 26) // out of range
-				gain = DEFAULT_GAIN;
+			} else if (gain > MAX_GAIN) // out of range
+				gain = MAX_GAIN;
 			break;
 		case 'A':
 			antenna = atoi(optarg);
