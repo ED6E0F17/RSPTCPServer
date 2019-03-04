@@ -50,6 +50,7 @@ int freq;
 int rate;
 int samples;
 int peak_hold = 0;
+double crop = 0.2;
 
 double atofs(char *s)
 /* standard suffixes */
@@ -77,6 +78,26 @@ double atofs(char *s)
 		return suff;
 	}
 	s[len - 1] = last;
+	return atof(s);
+}
+
+double atofp(char *s)
+/* percent suffixes */
+{
+	char last;
+	int len;
+	double suff = 1.0;
+	len = strlen(s);
+	last = s[len-1];
+	s[len-1] = '\0';
+	switch (last) {
+		case '%':
+			suff *= 0.01;
+			suff *= atof(s);
+			s[len-1] = last;
+			return suff;
+	}
+	s[len-1] = last;
 	return atof(s);
 }
 
@@ -1126,24 +1147,19 @@ void csv_dbm()
 	}
 
 	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
-	bin_count = len;
-	bw2 = (int)(((double)rate * (double)bin_count) / (len * 2));
-	fprintf(file, "%i, %i, %.2f, %i, ", freq - bw2, freq + bw2,
+	bw2 = (int)((double)rate * 0.5 * (1.0 - crop));
+	fprintf(file, "%i, %i, %0.2f, %i", freq - bw2, freq + bw2,
 		(double)rate / (double)len, samples);
 
-	i1 = 0; // + (int)((double)len * ts->crop * 0.5);
-	i2 = (len-1); // - (int)((double)len * ts->crop * 0.5);
-	for (i=i1; i<=i2; i++) {
-		dbm  = (double)avg[i];
-		dbm /= (double)rate;
-		dbm /= (double)samples;
+	i1 = (int)((double)len * 0.5 *  crop);
+	i2 = len - i1;
+	for (i = i1; i < i2; i++) {
+		dbm  = (double)avg[i] / ((double)rate * (double)samples);
 		dbm  = 10 * log10(dbm);
-		fprintf(file, "%.2f, ", dbm);
+		fprintf(file, ", %.2f", dbm);
 	}
-	dbm = (double)avg[i2] / ((double)rate * (double)samples);
-	dbm  = 10 * log10(dbm);
-	fprintf(file, "%.2f\n", dbm);
-	for (i=0; i<len; i++)
+	fprintf(file, "\n");
+	for (i = 0; i < len; i++)
 		avg[i] = 0.0f;
 	samples = 0;
 }
@@ -1160,6 +1176,8 @@ void usage(void)
 		"\t[-i integration_interval (default: 10 seconds)]\n"
 		"\t[-1 enables single-shot mode (default: off)]\n"
 		"\t[-e exit_timer (default: off/0)]\n"
+		"\t[-c crop (default: 20%%, recommended: up to 50%%)]\n"
+		"\t ( discards data at the edges: 0%% keeps full bandwidth )\n"
 		"\n"
 		"\t[-S samplerate (use wih caution)]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
@@ -1215,23 +1233,6 @@ int main(int argc, char **argv)
 
 	while ((opt = getopt(argc, argv, "f:i:e:c:g:A:S:s:w:d:P:p:F:Tt:R1DO")) != -1) {
 		switch (opt) {
-		case 'd':
-			device = atoi(optarg) - 1;
-			break;
-		case 'c':
-			// cropping not implemented;
-			break;
-		case 'g':
-			//gain range is 0 - 28 instead of 0.0 to 50.0 for rtl_sdr
-			gain = (int)(atof(optarg) / 2.0);
-			if (gain < 0) {// autogain request
-				gain = DEFAULT_GAIN;
-			}else if (MAX_GAIN > 26) // out of range
-				gain = MAX_GAIN;
-			break;
-		case 'A':
-			antenna = atoi(optarg);
-			break;
 		case 'f':
 			frequency = get_frequency(optarg);
 			break;
@@ -1241,6 +1242,16 @@ int main(int argc, char **argv)
 		case 'e':
 			exit_time = (time_t)((int)round(atoft(optarg)));
 			break;
+		case 'c':
+			crop = atofp(optarg);
+			break;
+		case 'g':
+			// Range is 0 - 28 instead of 0 - 50 for rtl_sdr
+			gain = (int)(atof(optarg) / 2.0);
+			break;
+		case 'A':
+			antenna = atoi(optarg);
+			break;
 		case 's':
 			// smoothing not implemented;
 			break;
@@ -1249,6 +1260,9 @@ int main(int argc, char **argv)
 			break;
 		case 'w':
 			// windowing not implemented;
+			break;
+		case 'd':
+			device = atoi(optarg) - 1;
 			break;
 		case 'T':
 			enable_biastee = 1;
@@ -1286,6 +1300,14 @@ int main(int argc, char **argv)
 	rate = samp_rate;
 	samples = 0;
 	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
+
+	if (gain < 0) {// autogain request
+		gain = DEFAULT_GAIN;
+	} else if (gain > MAX_GAIN) // out of range
+		gain = MAX_GAIN;
+
+	if ((crop < 0.0) || (crop >= 0.99))
+		crop = 0.2;
 
 	if (argc <= optind) {
 		filename = "-";
