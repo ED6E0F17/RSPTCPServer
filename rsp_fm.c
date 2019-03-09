@@ -221,15 +221,57 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 uint32_t buff_out = 0;
 void get_data()
 {
+	int i;
 	uint32_t line = buff_out & 15; // get next line
 	int16_t *in = &circ_buffer[line * FFT_SIZE * 2];
+	int16_t *out = fm_buf;
 
 	while (buff_out >= buff_now) {
 		usleep(1000);
 		if (do_exit)
 			return;
-}
-	/* stuff happens here */
+	}
+
+	for ( i = 0; (i + 63) < (2 * 2048); /* i+=64 */) {
+		int ia, ib, qa, qb;
+		ia = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i++;
+		qa = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i+=9;
+		ib = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i++;
+		qb = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i+=9;
+		*out++ = (ia + ib) >> 4;
+		*out++ = (qa + qb) >> 4;
+
+		i+=2; // skip a sample (i += 22)
+		ia = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i++;
+		qa = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i+=9;
+		ib = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i++;
+		qb = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i+=9;
+		*out++ = (ia + ib) >> 4;
+		*out++ = (qa + qb) >> 4;
+
+		i+=2; // skip a sample (i += 44)
+		ia = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i++;
+		qa = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i+=9;
+		ib = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i++;
+		qb = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		i+=9;
+		*out++ = (ia + ib) >> 4;
+		*out++ = (qa + qb) >> 4;
+
+		// dont skip a sample (i += 64)
+	}
+	buff_out++;
 }
 
 static rsp_model_t hardware_ver_to_model(int hw_version)
@@ -980,7 +1022,7 @@ void multiply(int ar, int aj, int br, int bj, int *cr, int *cj)
 	*cj = aj*br + ar*bj;
 }
 
-int polar_disc(int ar, int aj, int br, int bj)
+int16_t polar_disc(int ar, int aj, int br, int bj)
 {
 	int cr, cj;
 	double angle;
@@ -990,12 +1032,12 @@ int polar_disc(int ar, int aj, int br, int bj)
 	cj = aj*br - ar*bj;
 
 	angle = atan2((double)cj, (double)cr);
-	return (int)(angle * (1 << 14) / 3.2);
+	return (int16_t)(angle * (1 << 14) / 3.2);
 }
 
 void fm_demod(int wide)
 {
-	int i, len, pcm;
+	int i, len;
 	int16_t *lp = fm_buff;
 	int16_t *r = result48;
 
@@ -1006,12 +1048,10 @@ void fm_demod(int wide)
 		len = LEN_FM_N;
 	}
 
-	pcm = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
-	r[0] = (int16_t)pcm;
+	r[0] = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
 
 	for (i = 1; i < len / 2; i++) {
-		pcm = polar_disc(lp[i*2], lp[i*2+1], lp[i*2-2], lp[i*2-1]);
-		r[i] = (int16_t)pcm;
+		r[i] = polar_disc(lp[i*2], lp[i*2+1], lp[i*2-2], lp[i*2-1]);
 	}
 	fm_pre_r = lp[len - 2];
 	fm_pre_j = lp[len - 1];
