@@ -49,6 +49,14 @@ float *avg = NULL;
 int freq;
 int rate;
 int samples;
+FILE *file;
+
+typedef enum {
+MODE_FM,
+MODE_USB,
+MODE_RAW,
+} demod_t;
+demod_t mode_demod = MODE_FM;
 
 double atofs(char *s)
 /* standard suffixes */
@@ -1076,13 +1084,46 @@ void usb_demod()
 	push_to_stdout();
 }
 
+void generate_header(int samplerate)
+{
+	int i, s_rate, b_rate;
+	char *channels = "\1\0";
+	char *align = "\2\0";
+	uint8_t samp_rate[4] = {0, 0, 0, 0};
+	uint8_t byte_rate[4] = {0, 0, 0, 0};
+	s_rate = samplerate;
+	b_rate = s_rate * 2;
+	if (mode_demod == MODE_RAW) {
+		channels = "\2\0";
+		align = "\4\0";
+		b_rate *= 2;
+	}
+	for (i=0; i<4; i++) {
+		samp_rate[i] = (uint8_t)((s_rate >> (8*i)) & 0xFF);
+		byte_rate[i] = (uint8_t)((b_rate >> (8*i)) & 0xFF);
+	}
+	fwrite("RIFF",     1, 4, file);
+	fwrite("\xFF\xFF\xFF\xFF", 1, 4, file);  /* size */
+	fwrite("WAVE",     1, 4, file);
+	fwrite("fmt ",     1, 4, file);
+	fwrite("\x10\0\0\0", 1, 4, file);  /* size */
+	fwrite("\1\0",     1, 2, file);  /* pcm */
+	fwrite(channels,   1, 2, file);
+	fwrite(samp_rate,  1, 4, file);
+	fwrite(byte_rate,  1, 4, file);
+	fwrite(align, 1, 2, file);
+	fwrite("\x10\0",     1, 2, file);  /* bits per channel */
+	fwrite("data",     1, 4, file);
+	fwrite("\xFF\xFF\xFF\xFF", 1, 4, file);  /* size */
+}
+
 
 // Sample 2.048 Mhz, take FM at 192k wide, or 48k narrow
 void usage(void)
 {
 	printf("rsp_fm, a minimal rtl_fm implementation for SDRPlay receivers."
 		"\n\n"
-		"Usage: rsp_fm -f 88.5M [options]\n"
+		"Usage: rsp_fm -f 88.5M [options] filename\n"
 		"\t[-f frequency (no scanning support)]\n"
 		"\t[-g gain (0.0 to 56.0, default: 32)]\n"
 		"\t[-W sets wideband, for broadcast FM]\n"
@@ -1119,6 +1160,7 @@ int main(int argc, char **argv)
 	int gain = DEFAULT_GAIN;
 
 	struct sigaction sigact, sigign;
+	char *filename;
 
 	fprintf(stderr, "rsp_fm V%d.%d\n\n", RSP_FM_VERSION_MAJOR, RSP_FM_VERSION_MINOR);
 
@@ -1164,9 +1206,21 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (argc <= optind) {
+		file = stdout;
+	} else {
+		filename = argv[optind];
+		file = fopen(filename, "wb");
+		if (!file) {
+			fprintf(stderr, "Failed to open %s\n", filename);
+			exit(1);
+		}
+	}
+
 	freq = frequency;
 	rate = samp_rate;
 	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
+	generate_header(48000);
 
 	// check API version
 	r = mir_sdr_ApiVersion(&ver);
