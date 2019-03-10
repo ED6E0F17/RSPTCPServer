@@ -37,14 +37,22 @@
 // temporary fixed resolution of 2.048 Mhz / 1 kHz = 2048 IQ samples
 #define FFT_INDEX (11)
 #define FFT_SIZE (2048)
-#define FM_LEN_W (3 * FFT_SIZE / 32 )
-#define FM_LEN_N (FM_LEN_W >> 2)
-// buffer sizes: 2048 IQ -> 196 IQ -> (48 IQ) -> 48 MONO  -> 480 OUT
+
+// buffer sizes: 2048 IQ -> 196 IQ -> (196 mono or 48 IQ) -> 48 mono  -> 480 OUT
+#define LEN_FM_W (3 * FFT_SIZE / 32 )
+#define LEN_FM_N (LEN_FM_W / 4)
+#define LEN_OUT (10 * LEN_FM_N)
+
+// IQ input, 196 sample pairs, output as 48 samples audio
+int16_t fm_buff[LEN_FM_W * 2];
+
+// audio output, 48 samples per ms
+int16_t	result48[LEN_OUT];
+
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
 int16_t* IQ = NULL;
-int16_t fm_buf[192 * 2];
 float *avg = NULL;
 int freq;
 int rate;
@@ -232,7 +240,7 @@ void get_data()
 	int i;
 	uint32_t line = buff_out & 15; // get next line
 	int16_t *in = &circ_buffer[line * FFT_SIZE * 2];
-	int16_t *out = fm_buf;
+	int16_t *out = fm_buff;
 
 	while (buff_out >= buff_now) {
 		usleep(1000);
@@ -982,21 +990,17 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 }
 
 /**********************************/
-// buffer sizes: 2048 IQ -> 196 IQ -> (196 mono or 48 IQ) -> 48 mono  -> 480 OUT
 
-#define LEN_FM_W (3 * FFT_SIZE / 32 )
-#define LEN_FM_N (FM_LEN_W >> 2)
-
-int	fm_pre_r, fm_pre_j;
-
-// IQ input, 196 sample pairs
-// audio output, may be 196 samples in wideband
-int16_t	result48[LEN_FM_W];
-int16_t fm_buff[LEN_FM_W];
-
-void push_to_stdout()
+void push_to_file()
 {
-	// count to ten before pushing
+	static int ptr = 0;
+
+	memcpy( &result48[ptr * LEN_FM_N], fm_buff, LEN_FM_N * sizeof(int16_t) );
+	ptr++;
+	if (ptr > 9) {
+		ptr = 0;
+		fwrite(result48, 2, LEN_OUT, file);
+	}
 }
 
 // inplace downsample interleaved IQ data
@@ -1043,16 +1047,17 @@ int16_t polar_disc(int ar, int aj, int br, int bj)
 	return (int16_t)(angle * (1 << 14) / 3.2);
 }
 
+int fm_pre_r, fm_pre_j;
 void fm_demod(int wide)
 {
 	int i, len;
 	int16_t *lp = fm_buff;
-	int16_t *r = result48;
+	int16_t *r = fm_buff;
 
 	if (wide) {
 		len = LEN_FM_W;
 	} else {
-		quartersampleIQ(r, LEN_FM_W);
+		quartersampleIQ(lp, LEN_FM_W);
 		len = LEN_FM_N;
 	}
 
@@ -1067,21 +1072,21 @@ void fm_demod(int wide)
 	if (wide)
 		quartersample(r, LEN_FM_W);
 
-	push_to_stdout();
+	push_to_file();
 }
 
 void usb_demod()
 {
 	int i, pcm;
 	int16_t *lp = fm_buff;
-	int16_t *r  = result48;
+	int16_t *r  = fm_buff;
 
-	quartersampleIQ(r, LEN_FM_W);
+	quartersampleIQ(lp, LEN_FM_W);
 	for (i = 0; i < LEN_FM_N / 2; i ++) {
 		pcm = (lp[i*2] + lp[i*2+1]);
 		r[i] = pcm >> 2;
 	}
-	push_to_stdout();
+	push_to_file();
 }
 
 void generate_header(int samplerate)
@@ -1158,6 +1163,7 @@ int main(int argc, char **argv)
 	int enable_refout = 0;
 	int bit_depth = 16;
 	int gain = DEFAULT_GAIN;
+	int widefm = 0;
 
 	struct sigaction sigact, sigign;
 	char *filename;
@@ -1303,11 +1309,11 @@ int main(int argc, char **argv)
 
 	while (!do_exit) {
 		get_data();
-		// demodulate at 192k
-		// or downsample to 48k first
-		// then dump to file
-		//
-		// fprintf(stdout, ??);
+		if (mode_demod == MODE_FM) {
+			fm_demod(widefm);
+		} else if (mode_demod == MODE_USB) {
+			usb_demod();
+		}
 	}
 
 out:
