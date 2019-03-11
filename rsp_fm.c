@@ -63,6 +63,8 @@ typedef enum {
 MODE_FM,
 MODE_USB,
 MODE_RAW,
+MODE_LSB,
+MODE_AM
 } demod_t;
 demod_t mode_demod = MODE_FM;
 
@@ -229,6 +231,7 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 			data[j++] = *xq;
 			xi++; xq++;
 		}
+		buff_offset = j;
 	}
 }
 
@@ -1138,8 +1141,8 @@ void usage(void)
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
 		"\n"
-		"\t dumps samples to stdout with a WAV header\n"
-		"\t (only supports 48kHz output)\n"
+		"\t Writes samples to file with a WAV header\n"
+		"\t (** only supports 48kHz output **)\n"
 		"\n rsp_fm -f 88.5M -W | aplay"
 		"\n"
 		"\n"
@@ -1170,7 +1173,7 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "rsp_fm V%d.%d\n\n", RSP_FM_VERSION_MAJOR, RSP_FM_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "f:g:A:d:P:p:F:TRDO")) != -1) {
+	while ((opt = getopt(argc, argv, "f:g:A:d:P:p:F:M:WTRDOW")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
@@ -1204,6 +1207,23 @@ int main(int argc, char **argv)
 			// offset_tuning = 1;
 		case 'F':
 			// comp_fir_size = atoi(optarg);
+			break;
+		case 'M':
+			if (strcmp("fm",  optarg) == 0) {
+				mode_demod = MODE_FM;	}
+			else if (strcmp("raw",  optarg) == 0) {
+				mode_demod = MODE_RAW;	}
+			else if (strcmp("am",  optarg) == 0) {
+				mode_demod = MODE_AM;	}
+			else if (strcmp("usb", optarg) == 0) {
+				mode_demod = MODE_USB;	}
+			else if (strcmp("lsb", optarg) == 0) {
+				mode_demod = MODE_LSB;	}
+			else if (strcmp("wbfm",  optarg) == 0) {
+				widefm = 1;	}
+			break;
+		case 'W':
+			widefm = 1;
 			break;
 		case 'h':
 		default:
