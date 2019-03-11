@@ -295,6 +295,7 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 			data[j++] = *xq;
 			xi++; xq++;
 		}
+		buff_offset = j;
 	}
 }
 void get_data()
