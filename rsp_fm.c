@@ -253,40 +253,42 @@ void get_data()
 
 	for ( i = 0; (i + 63) < (2 * 2048); /* i+=64 */) {
 		int ia, ib, qa, qb;
-		ia = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		ia = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i++;
-		qa = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		qa = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i+=9;
-		ib = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		ib = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i++;
-		qb = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		qb = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i+=9;
-		*out++ = (ia + ib) >> 4;
-		*out++ = (qa + qb) >> 4;
+		*out++ = (ia + ib) >> 3;
+		*out++ = (qa + qb) >> 3;
 
 		i+=2; // skip a sample (i += 22)
-		ia = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+
+		ia = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i++;
-		qa = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		qa = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i+=9;
-		ib = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		ib = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i++;
-		qb = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		qb = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i+=9;
-		*out++ = (ia + ib) >> 4;
-		*out++ = (qa + qb) >> 4;
+		*out++ = (ia + ib) >> 3;
+		*out++ = (qa + qb) >> 3;
 
 		i+=2; // skip a sample (i += 44)
-		ia = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+
+		ia = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i++;
-		qa = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		qa = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i+=9;
-		ib = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		ib = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i++;
-		qb = in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
+		qb = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
 		i+=9;
-		*out++ = (ia + ib) >> 4;
-		*out++ = (qa + qb) >> 4;
+		*out++ = (ia + ib) >> 3;
+		*out++ = (qa + qb) >> 3;
 
 		// dont skip a sample (i += 64)
 	}
@@ -1012,10 +1014,10 @@ void quartersampleIQ(int16_t *data, int length)
 	int i, f;
 	for (i = 0; (i*4) < (2 * length - 7); i++) {
 		f = i * 4;
-		data[i] = (data[f] + 2 * (data[f + 2] + data[f + 4])
+		data[i] = ((int)data[f] + 2 * ((int)data[f + 2] + data[f + 4])
 			+ data[f + 6] ) >> 3;
 		f++; i++;
-		data[i] = ( data[f] + 2 * (data[f + 2] + data[f + 4])
+		data[i] = ((int)data[f] + 2 * ((int)data[f + 2] + data[f + 4])
 			+ data[f + 6] ) >> 3;
 	}
 }
@@ -1026,7 +1028,7 @@ void quartersample(int16_t *data, int length)
 	int i, f;
 	for (i = 0; (i*4)<(length - 3); i++) {
 		f = i * 4;
-		data[i] = (data[f] + 2 * (data[f + 1]+ data[f + 2])
+		data[i] = ((int)data[f] + 2 * ((int)data[f + 1]+ data[f + 2])
 			+ data[f + 3] ) >> 3;
 	}
 }
@@ -1054,6 +1056,7 @@ int fm_pre_r, fm_pre_j;
 void fm_demod(int wide)
 {
 	int i, len;
+	int16_t temp;
 	int16_t *lp = fm_buff;
 	int16_t *r = fm_buff;
 
@@ -1064,13 +1067,16 @@ void fm_demod(int wide)
 		len = LEN_FM_N;
 	}
 
-	r[0] = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
+	// inplace demod, protect first sample
+	temp = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
+	r[1] = polar_disc(lp[2], lp[3], lp[0], lp[1]);
+	r[0] = temp;
 
-	for (i = 1; i < len / 2; i++) {
+	for (i = 2; i < len; i++) {
 		r[i] = polar_disc(lp[i*2], lp[i*2+1], lp[i*2-2], lp[i*2-1]);
 	}
-	fm_pre_r = lp[len - 2];
-	fm_pre_j = lp[len - 1];
+	fm_pre_r = lp[2 * len - 2];
+	fm_pre_j = lp[2 * len - 1];
 
 	if (wide)
 		quartersample(r, LEN_FM_W);
@@ -1085,8 +1091,8 @@ void usb_demod()
 	int16_t *r  = fm_buff;
 
 	quartersampleIQ(lp, LEN_FM_W);
-	for (i = 0; i < LEN_FM_N / 2; i ++) {
-		pcm = (lp[i*2] + lp[i*2+1]);
+	for (i = 0; i < LEN_FM_N; i ++) {
+		pcm = ((int)lp[i*2] + lp[i*2+1]);
 		r[i] = pcm >> 2;
 	}
 	push_to_file();
