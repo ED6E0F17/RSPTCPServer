@@ -1310,7 +1310,7 @@ int main(int argc, char **argv)
 	}
 
 	// enable DC offset and IQ imbalance correction
-	mir_sdr_DCoffsetIQimbalanceControl(0, 0);
+	mir_sdr_DCoffsetIQimbalanceControl(1, 1);
 	// disable decimation and  set decimation factor to 1
 	mir_sdr_DecimateControl(0, 1, 0);
 
