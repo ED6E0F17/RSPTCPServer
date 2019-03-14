@@ -54,8 +54,7 @@ int16_t	result48[LEN_OUT];
 
 int16_t* IQ = NULL;
 float *avg = NULL;
-int freq;
-int rate;
+int offset_freq;
 int samples;
 FILE *file;
 
@@ -236,6 +235,7 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 }
 
 
+#define POS(x) (int)(in[i + x])
 // Downsample by 3 / 32 - 2048MHz to 96 Khz
 uint32_t buff_out = 0;
 void get_data()
@@ -250,47 +250,54 @@ void get_data()
 		if (do_exit)
 			return;
 	}
-
+        // Offset tuning; rotate before downsample: [ 0, 1] [-3, 2] [-4, -5] [7, -6]
+	// xreal[i] = (buf[pos+0] - buf[pos+3] - buf[pos+4] + buf[pos+7]);
+	// yimag[i] = (buf[pos+1] + buf[pos+2] - buf[pos+5] - buf[pos+6]);
+	// Tune to samplerate/4 above target frequency
 	for ( i = 0; (i + 63) < (2 * 2048); /* i+=64 */) {
-		int ia, ib, qa, qb;
-		ia = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i++;
-		qa = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i+=9;
-		ib = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i++;
-		qb = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i+=9;
-		*out++ = (ia + ib) >> 3;
-		*out++ = (qa + qb) >> 3;
+		int ia, qa;
+		ia = POS(0) - POS(3) - POS(4) + POS(7);
+		qa = POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;
+		ia += POS(0) - POS(3); // - POS(4) + POS(7);
+		qa += POS(1) + POS(2); // - POS(5) - POS(6);
+		*out++ = ia >> 3;
+		*out++ = qa >> 3;
 
-		i+=2; // skip a sample (i += 22)
+		// skip a sample
 
-		ia = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i++;
-		qa = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i+=9;
-		ib = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i++;
-		qb = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i+=9;
-		*out++ = (ia + ib) >> 3;
-		*out++ = (qa + qb) >> 3;
+		ia = /* POS(0) - POS(3) - POS(4) */ POS(7);
+		qa = /* POS(1) - POS(2) - POS(5) */-POS(6);
+		i+=8;
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;	// 32 is half way
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;
+		ia += POS(0); // - POS(3) - POS(4) + POS(7);
+		qa += POS(1); // + POS(2) - POS(5) - POS(6);
+		*out++ = ia >> 3;
+		*out++ = qa >> 3;
 
-		i+=2; // skip a sample (i += 44)
+		// skip a sample
 
-		ia = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i++;
-		qa = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i+=9;
-		ib = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i++;
-		qb = (int)in[i] + in[i+2] + in[i+4] + in[i+6] + in[i+8];
-		i+=9;
-		*out++ = (ia + ib) >> 3;
-		*out++ = (qa + qb) >> 3;
+		ia = /* POS(0) - POS(3) */ -POS(4) + POS(7);
+		qa = /* POS(1) - POS(2) */ -POS(5) - POS(6);
+		i+=8;
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8; // 32 is half way
+		ia += POS(0) - POS(3) - POS(4) + POS(7);
+		qa += POS(1) + POS(2) - POS(5) - POS(6);
+		i+=8;	// 32 IQ  samples = 64
+		*out++ = ia >> 3;
+		*out++ = qa >> 3;
 
-		// dont skip a sample (i += 64)
+		// dont skip a sample
 	}
 	buff_out++;
 }
@@ -1249,8 +1256,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	freq = frequency;
-	rate = samp_rate;
+	offset_freq = frequency + (samp_rate >> 2); // offset tuning
 	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
 	generate_header(48000);
 
@@ -1327,7 +1333,7 @@ int main(int argc, char **argv)
 	circ_buffer = calloc(16, FFT_SIZE * 2 * sizeof(int16_t));
 
 	// initialise API and start the rx
-	r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
+	r = init_rsp_device(samp_rate, offset_freq, enable_biastee, notch, enable_refout, antenna, gain);
 	if (r != 0) {
 		fprintf(stderr, "failed to initialise RSP device\n");
 		goto out;
