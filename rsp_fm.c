@@ -1100,8 +1100,50 @@ void usb_demod()
 	quartersampleIQ(lp, LEN_FM_W);
 	for (i = 0; i < LEN_FM_N; i ++) {
 		pcm = ((int)lp[i*2] + lp[i*2+1]);
-		r[i] = pcm >> 2;
+		r[i] = pcm >> 1;
 	}
+	push_to_file();
+}
+
+void lsb_demod()
+{
+	int i, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+	for (i = 0; i < LEN_FM_N; i ++) {
+		pcm = ((int)lp[i*2] - lp[i*2+1]);
+		r[i] = pcm >> 1;
+	}
+	push_to_file();
+}
+
+void am_demod()
+{
+	int i, pcm;
+	float f;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+	for (i = 0; i < LEN_FM_N; i ++) {
+		f = sqrtf(lp[i*2]*lp[i*2] + lp[i*2+1]*lp[i*2+1]);
+		r[i] = (int)(f * 0.7f);
+	}
+	push_to_file();
+}
+
+void raw_out()
+{
+	int i, pcm;
+	int16_t *lp = fm_buff;
+	int16_t *r  = fm_buff;
+
+	quartersampleIQ(lp, LEN_FM_W);
+
+	push_to_file();
+	memcpy(r, &lp[LEN_FM_N], LEN_FM_N * sizeof(int16_t));
 	push_to_file();
 }
 
@@ -1345,6 +1387,12 @@ int main(int argc, char **argv)
 			fm_demod(widefm);
 		} else if (mode_demod == MODE_USB) {
 			usb_demod();
+		} else if (mode_demod == MODE_LSB) {
+			lsb_demod();
+		} else if (mode_demod == MODE_AM) {
+			am_demod();
+		} else {
+			raw_out(); // MODE_RAW
 		}
 	}
 
