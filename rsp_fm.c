@@ -49,13 +49,8 @@ int16_t fm_buff[LEN_FM_W * 2];
 // audio output, 48 samples per ms
 int16_t	result48[LEN_OUT];
 
-
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
-int16_t* IQ = NULL;
-float *avg = NULL;
-int offset_freq;
-int samples;
 FILE *file;
 
 typedef enum {
@@ -820,11 +815,11 @@ static int set_tuner_gain_mode(unsigned int mode)
 	return r;
 }
 
-static int set_freq_correction(int32_t corr)
+static int set_freq_correction(double corr)
 {
 	int r;
 
-	r = mir_sdr_SetPpm((double)corr);
+	r = mir_sdr_SetPpm(corr);
 	if (r != mir_sdr_Success) {
 		fprintf(stderr, "set freq correction error (%d)\n", r);
 	}
@@ -963,7 +958,7 @@ static int set_sample_rate(uint32_t sr)
 	return r;
 }
 
-int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna, int gain)
+int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna, int gain, double ppm)
 {
 	int r;
 	uint8_t ifgain, lnastate;
@@ -998,6 +993,10 @@ int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsig
 	// set antenna input
 	set_antenna_input(antenna);
 
+	// set ppm error correction
+	if (ppm != 0.0)
+		set_freq_correction(ppm);
+
 	return 0;
 }
 
@@ -1012,6 +1011,62 @@ void push_to_file()
 	if (ptr > 9) {
 		ptr = 0;
 		fwrite(result48, 2, LEN_OUT, file);
+	}
+}
+
+// Okay, not at all generic.  Allows size 3, 5 or 9
+void generic_fir(int16_t *data, int length, int size)
+{
+	int d, sum;
+	static int16_t hist[9];
+
+	// Raised cosine in 15 degree steps
+	int f0 = 2588, f1 = 5000, f2 = 7071;
+	int f3 = 8660, f4 = 9659, f5 = 10000;
+
+
+	if (size > 6) { //size 9
+	    for (d=0; d<length; d++) {
+		hist[0] = hist[1];
+		hist[1] = hist[2];
+		hist[2] = hist[3];
+		hist[3] = hist[4];
+		hist[4] = hist[5];
+		hist[5] = hist[6];
+		hist[6] = hist[7];
+		hist[7] = hist[8];
+		hist[8] = data[d*2];
+		sum = 0;
+		sum += (hist[0] + hist[8]) * f1;
+		sum += (hist[1] + hist[7]) * f2;
+		sum += (hist[2] + hist[6]) * f3;
+		sum += (hist[3] + hist[5]) * f4;
+		sum +=            hist[4]  * f5;
+		data[d*2] = sum >> 16;
+	    }
+	} else if (size > 3) { // size 5
+	    for (d=0; d<length; d++) {
+		hist[0] = hist[1];
+		hist[1] = hist[2];
+		hist[2] = hist[3];
+		hist[3] = hist[4];
+		hist[4] = data[d*2];
+		sum = 0;
+		sum += (hist[0] + hist[4]) * f1;
+		sum += (hist[1] + hist[3]) * f3;
+		sum +=            hist[2]  * f5;
+		data[d*2] = sum >> 16;
+	    }
+	} else { // size 3
+	    for (d=0; d<length; d++) {
+		hist[0] = hist[1];
+		hist[1] = hist[2];
+		hist[2] = data[d*2];
+		sum = 0;
+		sum += (hist[0] + hist[2]) * f1;
+		sum +=            hist[1]  * f5;
+		data[d*2] = sum >> 15;
+	    }
 	}
 }
 
@@ -1060,7 +1115,7 @@ int16_t polar_disc(int ar, int aj, int br, int bj)
 }
 
 int fm_pre_r, fm_pre_j;
-void fm_demod(int wide)
+void fm_demod(int wide, int lowpass)
 {
 	int i, len;
 	int16_t temp;
@@ -1074,7 +1129,12 @@ void fm_demod(int wide)
 		len = LEN_FM_N;
 	}
 
-	// inplace demod, protect first sample
+	if (lowpass) {
+		generic_fir(lp, len, lowpass); // low pass I
+		generic_fir(lp + 1, len, lowpass); // low pass Q
+	}
+
+	// in-place demod: protect first sample
 	temp = polar_disc(lp[0], lp[1], fm_pre_r, fm_pre_j);
 	r[1] = polar_disc(lp[2], lp[3], lp[0], lp[1]);
 	r[0] = temp;
@@ -1087,7 +1147,6 @@ void fm_demod(int wide)
 
 	if (wide)
 		quartersample(r, LEN_FM_W);
-
 	push_to_file();
 }
 
@@ -1098,6 +1157,7 @@ void usb_demod()
 	int16_t *r  = fm_buff;
 
 	quartersampleIQ(lp, LEN_FM_W);
+
 	for (i = 0; i < LEN_FM_N; i ++) {
 		pcm = ((int)lp[i*2] + lp[i*2+1]);
 		r[i] = pcm >> 1;
@@ -1112,6 +1172,7 @@ void lsb_demod()
 	int16_t *r  = fm_buff;
 
 	quartersampleIQ(lp, LEN_FM_W);
+
 	for (i = 0; i < LEN_FM_N; i ++) {
 		pcm = ((int)lp[i*2] - lp[i*2+1]);
 		r[i] = pcm >> 1;
@@ -1127,6 +1188,7 @@ void am_demod()
 	int16_t *r  = fm_buff;
 
 	quartersampleIQ(lp, LEN_FM_W);
+
 	for (i = 0; i < LEN_FM_N; i ++) {
 		f = sqrtf(lp[i*2]*lp[i*2] + lp[i*2+1]*lp[i*2+1]);
 		r[i] = (int)(f * 0.7f);
@@ -1189,12 +1251,15 @@ void usage(void)
 		"Usage: rsp_fm -f 88.5M [options] filename\n"
 		"\t[-f frequency (no scanning support)]\n"
 		"\t[-g gain (0.0 to 56.0, default: 32)]\n"
-		"\t[-W sets wideband, for broadcast FM]\n"
+		"\t[-W (wideband mode, for broadcast FM)]\n"
 		"\n"
+		"\t[-F lowpass (pre-filter size, default 3)]\n"
+		"\t[\t(0, off), (5, narrow), (9, AFSK)]\n"
+		"\t[-p ppm (frequency error correction)]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-A Antenna Port select* (0/1/2, default: 0, Port A)]\n"
-		"\t[-T Bias-T enable* (default: disabled)]\n"
-		"\t[-R Refclk output enable* (default: disabled)]\n"
+		"\t[-T (Bias-T enable - default disabled)]\n"
+		"\t[-R (Refclk output enable -default disabled)]\n"
 		"\n"
 		"\t Writes samples to file with a WAV header\n"
 		"\t (** only supports 48kHz output **)\n"
@@ -1208,8 +1273,9 @@ void usage(void)
 int main(int argc, char **argv)
 {
 	int length, r, opt, wb_mode = 0;
-	uint32_t i, frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
-
+	uint32_t i, offset_freq;
+	uint32_t frequency = DEFAULT_FREQUENCY;
+	uint32_t samp_rate = DEFAULT_SAMPLERATE;
 	float ver;
 	mir_sdr_DeviceT devices[MAX_DEVS];
 	unsigned int numDevs;
@@ -1222,7 +1288,8 @@ int main(int argc, char **argv)
 	int bit_depth = 16;
 	int gain = DEFAULT_GAIN;
 	int widefm = 0;
-
+	int fir_size = 3;
+	double ppm_error = 0.0;
 	struct sigaction sigact, sigign;
 	char *filename;
 
@@ -1254,14 +1321,15 @@ int main(int argc, char **argv)
 			enable_refout = 1;
 			break;
 		case 'p':
-			// ppm_error = atoi(optarg);
+			ppm_error = atof(optarg);
 			break;
 		case 'D':
 			// direct_sampling = 1;
 		case 'O':
 			// offset_tuning = 1;
+			break;
 		case 'F':
-			// comp_fir_size = atoi(optarg);
+			fir_size = atoi(optarg);
 			break;
 		case 'M':
 			if (strcmp("fm",  optarg) == 0) {
@@ -1375,7 +1443,7 @@ int main(int argc, char **argv)
 	circ_buffer = calloc(16, FFT_SIZE * 2 * sizeof(int16_t));
 
 	// initialise API and start the rx
-	r = init_rsp_device(samp_rate, offset_freq, enable_biastee, notch, enable_refout, antenna, gain);
+	r = init_rsp_device(samp_rate, offset_freq, enable_biastee, notch, enable_refout, antenna, gain, ppm_error);
 	if (r != 0) {
 		fprintf(stderr, "failed to initialise RSP device\n");
 		goto out;
@@ -1383,8 +1451,9 @@ int main(int argc, char **argv)
 
 	while (!do_exit) {
 		get_data();
+
 		if (mode_demod == MODE_FM) {
-			fm_demod(widefm);
+			fm_demod(widefm, fir_size);
 		} else if (mode_demod == MODE_USB) {
 			usb_demod();
 		} else if (mode_demod == MODE_LSB) {
