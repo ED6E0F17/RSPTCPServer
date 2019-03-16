@@ -46,11 +46,15 @@ int16_t* Sinewave = NULL;
 int16_t *fft_buf;
 int N_WAVE, LOG2_N_WAVE;
 float *avg = NULL;
-int freq;
 int rate;
-int samples;
+int samples = 0;
 int peak_hold = 0;
 double crop = 0.2;
+uint32_t t_lower;
+uint32_t t_upper;
+uint32_t t_span;
+uint32_t t_start;
+uint32_t t_scans;
 
 double atofs(char *s)
 /* standard suffixes */
@@ -127,9 +131,9 @@ double atoft(char *s)
 	return atof(s);
 }
 
-uint32_t get_frequency(char *optarg)
+void get_frequency(char *optarg)
 {
-	double lower, upper, freq; // max_size is ignored
+	double lower, upper;
 	char *start, *stop, *step;
 
 	/* hacky string parsing */
@@ -142,13 +146,44 @@ uint32_t get_frequency(char *optarg)
 	upper = atofs(stop);
 	// max_size = atofs(step);
 	free(start);
+	t_lower = (uint32_t)lower;
+	t_upper = (uint32_t)upper;
+	// fixed fft size, step is not variable
+}
 
-	freq = (lower + upper) / 2.0;
-	if (freq < 1.048e6) // reasonable minimum
-		freq = 1.048e6;
-	if (freq > 2.0e9) // unreasonable maximum
-		freq = 2.0e9;
-	return (uint32_t)freq;
+void get_ranges(void)
+{
+	uint32_t scans = 0;
+	double bw_to_scan, bw_used, freq;
+	double lower = t_lower;
+	double upper = t_upper;
+	double bw = rate;
+
+	if (lower < 1.048e6) // reasonable minimum
+		lower = 1.048e6;
+	if (upper < lower)
+		upper = lower + 1.5e6;
+	if (upper > 2.0e9) // unreasonable maximum
+		upper = 2.0e9;
+	if (lower > upper)
+		lower = upper - 1.5e6;
+	if (upper - lower < 0.5e6)
+		upper = lower + 0.5e6;
+	if (upper - lower > 1.0e8)
+		upper = lower + 1.0e8;
+
+
+	/* evenly sized ranges */
+	bw_to_scan = upper - lower;
+	bw_used = bw * (1.0 - crop);
+	while ((bw_used * scans <  bw_to_scan))
+		scans++;
+	crop = 1.0 - (bw_to_scan / (scans * bw));
+	bw_used = bw * (1.0 - crop);
+	freq = lower + (bw_used / 2.0);
+	t_start = (uint32_t)freq;
+	t_span = (uint32_t)bw_used;
+	t_scans = scans;
 }
 
 static volatile int do_exit = 0;
@@ -1131,7 +1166,7 @@ void scanner(void)
 	}
 }
 
-void csv_dbm()
+void csv_dbm(int freq)
 {
 	int i, len, ds, i1, i2, bw2, bin_count;
 	float tmp;
@@ -1204,8 +1239,8 @@ int main(int argc, char **argv)
 {
 	char *filename = "power.dump";
 	int length, r, opt, wb_mode = 0;
-	uint32_t frequency = DEFAULT_FREQUENCY, samp_rate = DEFAULT_SAMPLERATE;
-	uint32_t i, bandwidth = DEFAULT_SAMPLERATE;
+	uint32_t frequency = DEFAULT_FREQUENCY;
+	uint32_t i;
 
 	float ver;
 	mir_sdr_DeviceT devices[MAX_DEVS];
@@ -1224,7 +1259,7 @@ int main(int argc, char **argv)
 	time_t exit_time = 0;
 	char t_str[50];
 	struct tm *cal_time;
-	int interval = 5;
+	int interval = 10;
 
 	struct sigaction sigact, sigign;
 
@@ -1232,10 +1267,11 @@ int main(int argc, char **argv)
 
 	// printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
+	rate = DEFAULT_SAMPLERATE;
 	while ((opt = getopt(argc, argv, "f:i:e:c:g:A:S:s:w:d:P:p:F:Tt:R1DO")) != -1) {
 		switch (opt) {
 		case 'f':
-			frequency = get_frequency(optarg);
+			get_frequency(optarg);
 			break;
 		case 'i':
 			interval = (int)round(atoft(optarg));
@@ -1257,7 +1293,7 @@ int main(int argc, char **argv)
 			// smoothing not implemented;
 			break;
 		case 'S':
-			samp_rate = (uint32_t)atoi(optarg);
+			rate = (uint32_t)atoi(optarg);
 			break;
 		case 'w':
 			// windowing not implemented;
@@ -1296,11 +1332,6 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
-
-	freq = frequency;
-	rate = samp_rate;
-	samples = 0;
-	sample_format = RSP_TCP_SAMPLE_FORMAT_INT16;
 
 	if (gain < 0) {// autogain request
 		gain = DEFAULT_GAIN;
@@ -1398,17 +1429,14 @@ int main(int argc, char **argv)
 	// allocate 5 buffers for 16 bit IQ samples
 	circ_buffer = calloc(5, FFT_SIZE * 2 * sizeof(int16_t));
 
+	get_ranges();
+	frequency = t_start;
 	// initialise API and start the rx
-	r = init_rsp_device(samp_rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
+	r = init_rsp_device(rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
 	if (r != 0) {
 		printf("failed to initialise RSP device\n");
 		goto out;
 	}
-
-	usleep(5000); // allow time for initial buffers to fill, and sdr to "settle"
-	next_tick = time(NULL) + interval;
-	if (exit_time) {
-		exit_time = time(NULL) + exit_time;}
 
 	if (!sine_table())
 		goto out;
@@ -1419,30 +1447,45 @@ int main(int argc, char **argv)
 	for (i=0; i<FFT_SIZE; i++)
 		avg[i] = 0.0f;
 
-	while (!do_exit) {
-		scanner();
-		// running close to real time on a Pi2, so slow things down a bit
-		usleep(1000);
-		time_now = time(NULL);
-		if (time_now < next_tick)
-			continue;
-		// loop within each time interval
+	// allow time for initial buffers to fill, and sync to seconds
+	next_tick = time(NULL);
+	while (time(NULL) == next_tick)
+		usleep(5000);
+	interval = (interval + t_scans - 1) / t_scans;
+	next_tick = time(NULL) + interval;
+	if (exit_time)
+		exit_time = time(NULL) + exit_time;
 
-		// then dump to file
-		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
+	while (!do_exit) {
+		int count = t_scans;
+		frequency = t_start;
+		time_now = time(NULL);
 		cal_time = localtime(&time_now);
 		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
+		while (count-- && !do_exit) {
+			while (time(NULL) < next_tick) {
+				scanner();
+				// running close to real time on a Pi2, so slow things down a bit
+				usleep(1000);
+			}
 
-		fprintf(file, "%s, ", t_str);
-		csv_dbm();
+			fprintf(file, "%s, ", t_str);
+			csv_dbm(frequency);
 
+			if (count) {
+				frequency += t_span;
+			} else
+				frequency = t_start;
+			set_freq(frequency);
+			usleep(5000);
+			while (time(NULL) >= next_tick)
+				next_tick += interval;
+		}
 		fflush(file);
 		if (single)
 			do_exit = 1;
 		if (exit_time && time(NULL) >= exit_time)
 			do_exit = 1;
-		while (time(NULL) >= next_tick)
-			next_tick += interval;
 	}
 
 out:
