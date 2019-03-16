@@ -1070,6 +1070,19 @@ void generic_fir(int16_t *data, int length, int size)
 	}
 }
 
+double dc_avg = 0.0;
+void dc_filter(int16_t* buffer, int len)
+{
+	int i, sum = 0;
+	int16_t last_avg = (int16_t)dc_avg;
+
+	for (i=0; i < len; i++) {
+		sum += (int)buffer[i];
+		buffer[i] -= last_avg;
+	}
+	dc_avg = (dc_avg * 9.0 + (double)sum / (double)len) / 10.0;
+}
+
 // inplace downsample interleaved IQ data
 void quartersampleIQ(int16_t *data, int length)
 {
@@ -1115,7 +1128,7 @@ int16_t polar_disc(int ar, int aj, int br, int bj)
 }
 
 int fm_pre_r, fm_pre_j;
-void fm_demod(int wide, int lowpass)
+void fm_demod(int wide, int lowpass, int dc_block)
 {
 	int i, len;
 	int16_t temp;
@@ -1147,6 +1160,8 @@ void fm_demod(int wide, int lowpass)
 
 	if (wide)
 		quartersample(r, LEN_FM_W);
+	if (dc_block)
+		dc_filter(r, LEN_FM_N);
 	push_to_file();
 }
 
@@ -1288,6 +1303,7 @@ int main(int argc, char **argv)
 	int bit_depth = 16;
 	int gain = DEFAULT_GAIN;
 	int widefm = 0;
+	int dc_block = 0;
 	int fir_size = 3;
 	double ppm_error = 0.0;
 	struct sigaction sigact, sigign;
@@ -1295,7 +1311,7 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "rsp_fm V%d.%d\n\n", RSP_FM_VERSION_MAJOR, RSP_FM_VERSION_MINOR);
 
-	while ((opt = getopt(argc, argv, "f:g:A:d:P:p:F:M:WTRDOW")) != -1) {
+	while ((opt = getopt(argc, argv, "f:g:A:d:P:p:F:M:E:WTR")) != -1) {
 		switch (opt) {
 		case 'd':
 			device = atoi(optarg) - 1;
@@ -1323,11 +1339,6 @@ int main(int argc, char **argv)
 		case 'p':
 			ppm_error = atof(optarg);
 			break;
-		case 'D':
-			// direct_sampling = 1;
-		case 'O':
-			// offset_tuning = 1;
-			break;
 		case 'F':
 			fir_size = atoi(optarg);
 			break;
@@ -1347,6 +1358,18 @@ int main(int argc, char **argv)
 			break;
 		case 'W':
 			widefm = 1;
+			break;
+		case 'E':
+			if (strcmp("edge",  optarg) == 0) {
+			}//bcontroller.edge = 1;}
+			if (strcmp("dc", optarg) == 0) {
+				dc_block = 1; }
+			if (strcmp("deemp",  optarg) == 0) {
+			}// demod.deemph = 1;}
+			if (strcmp("direct",  optarg) == 0) {
+			}// dongle.direct_sampling = 1;}
+			if (strcmp("offset",  optarg) == 0) {
+			}// dongle.offset_tuning = 1;}
 			break;
 		case 'h':
 		default:
@@ -1453,7 +1476,7 @@ int main(int argc, char **argv)
 		get_data();
 
 		if (mode_demod == MODE_FM) {
-			fm_demod(widefm, fir_size);
+			fm_demod(widefm, fir_size, dc_block);
 		} else if (mode_demod == MODE_USB) {
 			usb_demod();
 		} else if (mode_demod == MODE_LSB) {
