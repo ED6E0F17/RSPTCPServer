@@ -1071,7 +1071,7 @@ void generic_fir(int16_t *data, int length, int size)
 }
 
 double dc_avg = 0.0;
-void dc_filter(int16_t* buffer, int len)
+void dc_filter(int16_t *buffer, int len)
 {
 	int i, sum = 0;
 	int16_t last_avg = (int16_t)dc_avg;
@@ -1081,6 +1081,36 @@ void dc_filter(int16_t* buffer, int len)
 		buffer[i] -= last_avg;
 	}
 	dc_avg = (dc_avg * 9.0 + (double)sum / (double)len) / 10.0;
+}
+
+// stereo FM has a pilot tone at 19 kHz
+void eject_pilot(int16_t *data, int len)
+{
+	static int16_t hist[10];
+	int sum, d;
+
+	for (d=0; d<len; d++) {
+		sum = hist[0];
+		hist[0] = hist[1];
+		sum += hist[1]; //2
+		hist[1] = hist[2];
+		sum += hist[2];
+		hist[2] = hist[3];
+		sum += hist[3]; //4
+		hist[3] = hist[4];
+		sum += hist[4];
+		hist[4] = hist[5];
+		sum += hist[5]; //6
+		hist[5] = hist[6];
+		sum += hist[6];
+		hist[6] = hist[7];
+		sum += hist[7]; //8
+		hist[7] = hist[8];
+		sum += hist[8];
+		hist[8] = data[d];
+		sum += hist[8]; //10
+		data[d] = sum >> 3;
+	}
 }
 
 // inplace downsample interleaved IQ data
@@ -1158,8 +1188,10 @@ void fm_demod(int wide, int lowpass, int dc_block)
 	fm_pre_r = lp[2 * len - 2];
 	fm_pre_j = lp[2 * len - 1];
 
-	if (wide)
+	if (wide) {
+		eject_pilot(r, LEN_FM_W);
 		quartersample(r, LEN_FM_W);
+	}
 	if (dc_block)
 		dc_filter(r, LEN_FM_N);
 	push_to_file();
