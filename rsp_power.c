@@ -210,11 +210,9 @@ static int infoOverallGr;
 static int samples_per_packet;
 static int last_gain_idx = 0;
 static int verbose = 0;
-static int extended_mode = 0;
 static int hardware_version = 0;
 static rsp_capabilities_t *hardware_caps = NULL;
 static rsp_model_t hardware_model = RSP_MODEL_UNKNOWN;
-static rsp_tcp_sample_format_t sample_format = RSP_TCP_SAMPLE_FORMAT_UINT8;
 static rsp_band_t current_band = BAND_UNKNOWN;
 static int current_antenna_input = 0;
 static unsigned int current_frequency;
@@ -224,7 +222,6 @@ static int agc_set_point = DEFAULT_AGC_SETPOINT;
 static int gain_reduction = DEFAULT_GAIN_REDUCTION;
 static int am_port = -1;
 static uint8_t const_if_gain = 12;
-static int sample_shift = 2;
 
 // *************************************
 
@@ -381,6 +378,7 @@ static rsp_band_t frequency_to_band(unsigned int f)
 	}
 }
 
+#if 0
 static const char* model_to_string(rsp_model_t model)
 {
 	// Convert enumerated model to string for printing
@@ -398,6 +396,7 @@ static const char* model_to_string(rsp_model_t model)
 		return "Unknown";
 	}
 }
+#endif
 
 static rsp_capabilities_t *model_to_capabilities(rsp_model_t model)
 {
@@ -492,6 +491,7 @@ static int apply_agc_settings()
 	return r;
 }
 
+#if 0
 static int apply_gain_settings()
 {
 	int r;
@@ -543,6 +543,7 @@ static int set_agc_setpoint(int set_point)
 
 	return 0;
 }
+#endif
 
 static int set_bias_t(unsigned int enable)
 {
@@ -797,6 +798,7 @@ static int set_gain_by_index(unsigned int index)
 	return r;
 }
 
+#if 0
 static int set_gain(unsigned int db)
 {
 	int p;
@@ -851,6 +853,7 @@ static int set_freq_correction(int32_t corr)
 
 	return r;
 }
+#endif
 
 static int set_freq(uint32_t f)
 {
@@ -884,6 +887,7 @@ static int set_freq(uint32_t f)
 	return r;
 }
 
+#if 0
 static int set_sample_rate(uint32_t sr)
 {
 	int r;
@@ -982,6 +986,7 @@ static int set_sample_rate(uint32_t sr)
 
 	return r;
 }
+#endif
 
 int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna, int gain)
 {
@@ -1142,10 +1147,7 @@ int fix_fft(int16_t iq[])
 
 void scanner(void)
 {
-	int i, j, j2, f, n_read, bin_len, buf_len;
-	int32_t w;
-	buf_len = FFT_SIZE * 2;
-	bin_len = FFT_SIZE;
+	int j, bin_len = FFT_SIZE;
 	// single pass for now
 	{
 		get_data(); // update fft_buff
@@ -1168,7 +1170,7 @@ void scanner(void)
 
 void csv_dbm(int freq)
 {
-	int i, len, ds, i1, i2, bw2, bin_count;
+	int i, len, i1, i2, bw2;
 	float tmp;
 	double dbm;
 	len = FFT_SIZE;
@@ -1238,7 +1240,7 @@ void usage(void)
 int main(int argc, char **argv)
 {
 	char *filename = "power.dump";
-	int length, r, opt, wb_mode = 0;
+	int r, opt;
 	uint32_t frequency = DEFAULT_FREQUENCY;
 	uint32_t i;
 
@@ -1251,7 +1253,6 @@ int main(int argc, char **argv)
 	int antenna = 0;
 	int enable_biastee = 0;
 	int enable_refout = 0;
-	int bit_depth = 16;
 	int gain = DEFAULT_GAIN;
 
 	time_t next_tick;

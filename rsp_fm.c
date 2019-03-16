@@ -139,7 +139,6 @@ static int infoOverallGr;
 static int samples_per_packet;
 static int last_gain_idx = 0;
 static int verbose = 0;
-static int extended_mode = 0;
 static int hardware_version = 0;
 static rsp_capabilities_t *hardware_caps = NULL;
 static rsp_model_t hardware_model = RSP_MODEL_UNKNOWN;
@@ -148,12 +147,11 @@ static rsp_band_t current_band = BAND_UNKNOWN;
 static int current_antenna_input = 0;
 static unsigned int current_frequency;
 static unsigned int lna_state = DEFAULT_LNA_STATE;
-static unsigned int agc_state = DEFAULT_AGC_STATE;
-static int agc_set_point = DEFAULT_AGC_SETPOINT;
+// static unsigned int agc_state = DEFAULT_AGC_STATE;
+// static int agc_set_point = DEFAULT_AGC_SETPOINT;
 static int gain_reduction = DEFAULT_GAIN_REDUCTION;
 static int am_port = -1;
 static uint8_t const_if_gain = 12;
-static int sample_shift = 2;
 
 // *************************************
 
@@ -454,6 +452,7 @@ static int gain_index_to_gain(unsigned int index, uint8_t *if_gr_out, uint8_t *l
 	return 1;
 }
 
+#if 0
 static int apply_agc_settings()
 {
 	int r;
@@ -518,6 +517,7 @@ static int set_agc_setpoint(int set_point)
 
 	return 0;
 }
+#endif
 
 static int set_bias_t(unsigned int enable)
 {
@@ -740,6 +740,7 @@ static int set_notch_filters(unsigned int notch)
 	return 0;
 }
 
+#if 0
 static int set_gain_by_index(unsigned int index)
 {
 	int r;
@@ -814,6 +815,7 @@ static int set_tuner_gain_mode(unsigned int mode)
 
 	return r;
 }
+#endif
 
 static int set_freq_correction(double corr)
 {
@@ -827,6 +829,7 @@ static int set_freq_correction(double corr)
 	return r;
 }
 
+#if 0
 static int set_freq(uint32_t f)
 {
 	int r;
@@ -957,6 +960,7 @@ static int set_sample_rate(uint32_t sr)
 
 	return r;
 }
+#endif
 
 int init_rsp_device(unsigned int sr, unsigned int freq, int enable_bias_t, unsigned int notch, int enable_refout, int antenna, int gain, double ppm)
 {
@@ -1021,7 +1025,7 @@ void generic_fir(int16_t *data, int length, int size)
 	static int16_t hist[9];
 
 	// Raised cosine in 15 degree steps
-	int f0 = 2588, f1 = 5000, f2 = 7071;
+	int /* 2588,*/ f1 = 5000, f2 = 7071;
 	int f3 = 8660, f4 = 9659, f5 = 10000;
 
 
@@ -1229,7 +1233,7 @@ void lsb_demod()
 
 void am_demod()
 {
-	int i, pcm;
+	int i;
 	float f;
 	int16_t *lp = fm_buff;
 	int16_t *r  = fm_buff;
@@ -1245,7 +1249,6 @@ void am_demod()
 
 void raw_out()
 {
-	int i, pcm;
 	int16_t *lp = fm_buff;
 	int16_t *r  = fm_buff;
 
@@ -1319,7 +1322,7 @@ void usage(void)
 
 int main(int argc, char **argv)
 {
-	int length, r, opt, wb_mode = 0;
+	int r, opt;
 	uint32_t i, offset_freq;
 	uint32_t frequency = DEFAULT_FREQUENCY;
 	uint32_t samp_rate = DEFAULT_SAMPLERATE;
@@ -1332,7 +1335,6 @@ int main(int argc, char **argv)
 	int antenna = 0;
 	int enable_biastee = 0;
 	int enable_refout = 0;
-	int bit_depth = 16;
 	int gain = DEFAULT_GAIN;
 	int widefm = 0;
 	int dc_block = 0;
