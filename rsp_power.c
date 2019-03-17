@@ -330,13 +330,14 @@ void rx_callback(short* xi, short* xq, unsigned int firstSampleNum, int grChange
 		buff_offset = j;
 	}
 }
-void get_data()
+int get_data(void)
 {
 	uint32_t line = (buff_now + 3) & 3; // most recently filled
 	fft_buf = &circ_buffer[4 * FFT_SIZE * 2];
 	int16_t *in = &circ_buffer[line * FFT_SIZE * 2];
 	memcpy(fft_buf, in, FFT_SIZE * 2 * sizeof(int16_t));
-	// could copy extra data to wrap around for window function
+
+	return line;
 }
 
 static rsp_model_t hardware_ver_to_model(int hw_version)
@@ -1145,13 +1146,18 @@ int fix_fft(int16_t iq[])
 	return 0;
 }
 
-void scanner(void)
+void scanner(int loop_count)
 {
-	int j, bin_len = FFT_SIZE;
-	// single pass for now
-	{
-		get_data(); // update fft_buff
-		// TODO: window function may improve quality
+	int i, j, line, last_line;
+	int bin_len = FFT_SIZE;
+
+	last_line = -1;
+	for (i = 0; i < loop_count; i++) {
+		line = get_data();
+		while (line == last_line) {
+			usleep(500);
+			line = get_data();
+		}
 		samples++;
 
 		fix_fft(fft_buf);
@@ -1218,20 +1224,13 @@ void usage(void)
 		"\t ( discards data at the edges: 0%% keeps full bandwidth )\n"
 		"\n"
 		"\t[-S samplerate (use wih caution)]\n"
+		"\t[\t(bin size is fixed at S / 2048)]\n"
 		"\t[-d RSP device to use (default: 1, first found)]\n"
 		"\t[-A Antenna Port select* (0/1/2, default: 0, Port A)]\n"
 		"\t[-T Bias-T enable* (default: disabled)]\n"
 		"\t[-R Refclk output enable* (default: disabled)]\n"
-		"\tfilename (a '-' dumps samples to stdout)\n"
-		"\t (omitting the filename also uses stdout)\n"
 		"\n"
-		"\n"
-		"\t[TODO:]\n"
-		"\t[\t cropping not implemented (Bandwidth = Samplerate)]\n"
-		"\t[\t combine multiple Bandwidths into one scan]\n"
-		"\t[\t stepsize ignored, defaults to Bandwidth/2048]\n"
-		"\t[\t window function not implemented (rectangular)]\n"
-		"\t[\t smoothing not implemented]\n"
+		"\n\tfilename (omitting the filename uses stdout)\n"
 		"\n"
 	      );
 		exit(1);
@@ -1256,11 +1255,11 @@ int main(int argc, char **argv)
 	int gain = DEFAULT_GAIN;
 
 	time_t next_tick;
-	time_t time_now;
 	time_t exit_time = 0;
 	char t_str[50];
 	struct tm *cal_time;
 	int interval = 10;
+	int ms_interval;
 
 	struct sigaction sigact, sigign;
 
@@ -1432,6 +1431,8 @@ int main(int argc, char **argv)
 
 	get_ranges();
 	frequency = t_start;
+	ms_interval = (interval * 1000) / t_scans + 1;
+
 	// initialise API and start the rx
 	r = init_rsp_device(rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
 	if (r != 0) {
@@ -1449,28 +1450,24 @@ int main(int argc, char **argv)
 		avg[i] = 0.0f;
 
 	// allow time for initial buffers to fill, and sync to seconds
-	next_tick = time(NULL);
-	while (time(NULL) == next_tick)
-		usleep(5000);
-	interval = (interval + t_scans - 1) / t_scans;
-	next_tick = time(NULL) + interval;
+	next_tick = time(NULL) + 1;
 	if (exit_time)
-		exit_time = time(NULL) + exit_time;
+		exit_time = next_tick + exit_time;
 
 	while (!do_exit) {
 		int count = t_scans;
+
 		frequency = t_start;
-		time_now = time(NULL);
-		cal_time = localtime(&time_now);
+		while (time(NULL) < next_tick)
+			usleep(10000);
+
+		cal_time = localtime(&next_tick);
 		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
 		while (count-- && !do_exit) {
-			while (time(NULL) < next_tick) {
-				scanner();
-				// running close to real time on a Pi2, so slow things down a bit
-				usleep(1000);
-			}
-
 			fprintf(file, "%s, ", t_str);
+
+			// scan "all" samples for "half" the time
+			scanner(ms_interval >> 1);
 			csv_dbm(frequency);
 
 			if (count) {
@@ -1479,9 +1476,9 @@ int main(int argc, char **argv)
 				frequency = t_start;
 			set_freq(frequency);
 			usleep(5000);
-			while (time(NULL) >= next_tick)
-				next_tick += interval;
 		}
+		while (time(NULL) >= next_tick)
+			next_tick += interval;
 		fflush(file);
 		if (single)
 			do_exit = 1;
