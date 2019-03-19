@@ -158,6 +158,7 @@ void get_ranges(void)
 	double lower = t_lower;
 	double upper = t_upper;
 	double bw = rate;
+	double bin_size = rate / FFT_SIZE;
 
 	if (lower < 1.048e6) // reasonable minimum
 		lower = 1.048e6;
@@ -184,6 +185,14 @@ void get_ranges(void)
 	t_start = (uint32_t)freq;
 	t_span = (uint32_t)bw_used;
 	t_scans = scans;
+
+	/* report */
+	fprintf(stderr, "Number of frequency hops: %i\n", t_scans);
+	fprintf(stderr, "Dongle bandwidth: %iHz\n", rate);
+	fprintf(stderr, "Cropping by: %0.1f%%\n", crop*100);
+	fprintf(stderr, "Total FFT bins: %i\n", t_scans * FFT_SIZE);
+	fprintf(stderr, "Logged FFT bins: %i\n", (int)((1.0 - crop) * t_scans * FFT_SIZE));
+	fprintf(stderr, "FFT bin size: %0.1fHz\n", bin_size);
 }
 
 static volatile int do_exit = 0;
@@ -366,10 +375,8 @@ static rsp_band_t frequency_to_band(unsigned int f)
 		return BAND_VHF;
 	} else if (f < 250000000) {
 		return BAND_3;
-	} else if (f < 400000000) {
-		return BAND_X;
 	} else if (f < 420000000) {
-		return SONDE;
+		return BAND_X;
 	} else if (f < 1000000000) {
 		return BAND_45;
 	} else if (f <= 2000000000) {
@@ -379,7 +386,6 @@ static rsp_band_t frequency_to_band(unsigned int f)
 	}
 }
 
-#if 0
 static const char* model_to_string(rsp_model_t model)
 {
 	// Convert enumerated model to string for printing
@@ -397,7 +403,6 @@ static const char* model_to_string(rsp_model_t model)
 		return "Unknown";
 	}
 }
-#endif
 
 static rsp_capabilities_t *model_to_capabilities(rsp_model_t model)
 {
@@ -444,7 +449,6 @@ static int gain_index_to_gain(unsigned int index, uint8_t *if_gr_out, uint8_t *l
 		lnastates = hardware_caps->bandx_lna_states;
 		break;
 
-	case SONDE:
 	case BAND_45:
 		if_gains = hardware_caps->band45_if_gains;
 		lnastates = hardware_caps->band45_lna_states;
@@ -1265,7 +1269,7 @@ int main(int argc, char **argv)
 
 	int single = 0;
 
-	// printf("rsp_power V%d.%d\n\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
+	fprintf(stderr, "rsp_power V%d.%d\n", RSP_POWER_VERSION_MAJOR, RSP_POWER_VERSION_MINOR);
 
 	rate = DEFAULT_SAMPLERATE;
 	while ((opt = getopt(argc, argv, "f:i:e:c:g:A:S:s:w:d:P:p:F:Tt:R1DO")) != -1) {
@@ -1351,10 +1355,10 @@ int main(int argc, char **argv)
 	r = mir_sdr_ApiVersion(&ver);
 	if (ver != MIR_SDR_API_VERSION) {
 		//  Error detected, include file does not match dll. Deal with error condition.
-		printf("library libmirsdrapi-rsp must be version %.2f\n", ver);
+		fprintf(stderr, "library libmirsdrapi-rsp must be version %.2f\n", ver);
 		exit(1);
 	}
-	// printf("libmirsdrapi-rsp version %.2f found\n", ver);
+	fprintf(stderr, "libmirsdrapi-rsp version %.2f found\n", ver);
 
 	// enable debug output
 	if (verbose) {
@@ -1396,10 +1400,10 @@ int main(int argc, char **argv)
 	hardware_caps = model_to_capabilities(hardware_model);
 
 	if (hardware_model == RSP_MODEL_UNKNOWN || hardware_caps == NULL) {
-		printf("unknown RSP model (hw ver %d)\n", hardware_version);
+		fprintf(stderr, "unknown RSP model (hw ver %d)\n\n", hardware_version);
 	}
 	else {
-		// printf("detected RSP model '%s' (hw ver %d)\n", model_to_string(hardware_model), hardware_version);
+		fprintf(stderr, "detected RSP model '%s' (hw ver %d)\n\n", model_to_string(hardware_model), hardware_version);
 	}
 
 	// enable DC offset and IQ imbalance correction
@@ -1436,7 +1440,7 @@ int main(int argc, char **argv)
 	// initialise API and start the rx
 	r = init_rsp_device(rate, frequency, enable_biastee, notch, enable_refout, antenna, gain);
 	if (r != 0) {
-		printf("failed to initialise RSP device\n");
+		fprintf(stderr, "failed to initialise RSP device\n");
 		goto out;
 	}
 

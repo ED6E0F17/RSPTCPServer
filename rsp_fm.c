@@ -317,39 +317,17 @@ static rsp_band_t frequency_to_band(unsigned int f)
 {
 	if ( f < 60000000) {
 		return current_antenna_input == 2 ? BAND_AM_HIZ : BAND_AM;
-	}
-	else
-	if (f < 120000000)
-	{
+	} else if (f < 120000000) {
 		return BAND_VHF;
-	}
-	else
-	if (f < 250000000)
-	{
+	} else if (f < 250000000) {
 		return BAND_3;
-	}
-	else
-	if (f < 400000000)
-	{
+	} else if (f < 420000000) {
 		return BAND_X;
-	}
-	else
-	if (f < 420000000)
-	{
-		return SONDE;
-	}
-	else
-	if (f < 1000000000)
-	{
+	} else if (f < 1000000000) {
 		return BAND_45;
-	}
-	else
-	if (f <= 2000000000)
-	{
+	} else if (f <= 2000000000) {
 		return BAND_L;
-	}
-	else
-	{
+	} else {
 		return BAND_UNKNOWN;
 	}
 }
@@ -417,7 +395,6 @@ static int gain_index_to_gain(unsigned int index, uint8_t *if_gr_out, uint8_t *l
 		lnastates = hardware_caps->bandx_lna_states;
 		break;
 
-	case SONDE:
 	case BAND_45:
 		if_gains = hardware_caps->band45_if_gains;
 		lnastates = hardware_caps->band45_lna_states;

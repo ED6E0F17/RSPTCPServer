@@ -11,6 +11,7 @@ const uint8_t rsp1_band3_gains_lnastates[] = { 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 
 const uint8_t rsp1_band3_gains_ifgains[] = { 0, 1, 2, 3, 4, 8, 9, 13, 15, 16, 17, 20, 21, 23, 7, 9, 11, 14, 15, 18, 19, 20, 22, 0, 1, 1, 2, 5, 7 };
 const uint8_t rsp1_bandx_gains_lnastates[] = { 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0 };
 const uint8_t rsp1_bandx_gains_ifgains[] = { 0, 1, 2, 3, 4, 8, 9, 13, 15, 16, 17, 20, 21, 23, 7, 9, 11, 14, 15, 18, 19, 20, 22, 0, 1, 1, 2, 5, 7 };
+const uint8_t rsp1_sonde_gains_ifgains[] = { 0, 1, 2, 3, 4, 8, 9, 13, 15, 16, 17, 20, 21, 23, 7, 9, 11, 14, 15, 18, 19, 20, 22, 2, 5, 8, 11, 13, 15 };
 const uint8_t rsp1_band45_gains_lnastates[] = { 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 const uint8_t rsp1_band45_gains_ifgains[] = { 0, 1, 2, 3, 4, 1, 2, 6, 8, 9, 10, 1, 2, 4, 0, 2, 4, 7, 8, 11, 12, 13, 15, 17, 18, 18, 19, 22, 24 };
 const uint8_t rsp1_lband_gains_lnastates[] = { 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -75,8 +76,7 @@ typedef enum {
 	BAND_X = 4,
 	BAND_45 = 5,
 	BAND_L = 6,
-	BAND_AM_HIZ = 7,
-	SONDE = 8
+	BAND_AM_HIZ = 7
 } rsp_band_t;
 
 typedef struct {
@@ -122,7 +122,7 @@ static rsp_capabilities_t device_caps[] = {
 		.band3_lna_states = rsp1_band3_gains_lnastates,
 		.band3_if_gains = rsp1_band3_gains_ifgains,
 		.bandx_lna_states = rsp1_bandx_gains_lnastates,
-		.bandx_if_gains = rsp1_bandx_gains_ifgains,
+		.bandx_if_gains = rsp1_sonde_gains_ifgains,
 		.band45_lna_states = rsp1_band45_gains_lnastates,
 		.band45_if_gains = rsp1_band45_gains_ifgains,
 		.lband_lna_states = rsp1_lband_gains_lnastates,
